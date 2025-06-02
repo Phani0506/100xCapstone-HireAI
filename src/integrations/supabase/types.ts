@@ -9,7 +9,122 @@ export type Json =
 export type Database = {
   public: {
     Tables: {
-      [_ in never]: never
+      parsed_resume_details: {
+        Row: {
+          created_at: string
+          education_json: Json | null
+          email: string | null
+          experience_json: Json | null
+          full_name: string | null
+          id: string
+          location: string | null
+          phone: string | null
+          raw_text_content: string | null
+          resume_id: string
+          skills_json: Json | null
+          summary: string | null
+          updated_at: string
+          user_id: string
+        }
+        Insert: {
+          created_at?: string
+          education_json?: Json | null
+          email?: string | null
+          experience_json?: Json | null
+          full_name?: string | null
+          id?: string
+          location?: string | null
+          phone?: string | null
+          raw_text_content?: string | null
+          resume_id: string
+          skills_json?: Json | null
+          summary?: string | null
+          updated_at?: string
+          user_id: string
+        }
+        Update: {
+          created_at?: string
+          education_json?: Json | null
+          email?: string | null
+          experience_json?: Json | null
+          full_name?: string | null
+          id?: string
+          location?: string | null
+          phone?: string | null
+          raw_text_content?: string | null
+          resume_id?: string
+          skills_json?: Json | null
+          summary?: string | null
+          updated_at?: string
+          user_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "parsed_resume_details_resume_id_fkey"
+            columns: ["resume_id"]
+            isOneToOne: false
+            referencedRelation: "resumes"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      profiles: {
+        Row: {
+          created_at: string
+          email: string | null
+          full_name: string | null
+          id: string
+          updated_at: string
+        }
+        Insert: {
+          created_at?: string
+          email?: string | null
+          full_name?: string | null
+          id: string
+          updated_at?: string
+        }
+        Update: {
+          created_at?: string
+          email?: string | null
+          full_name?: string | null
+          id?: string
+          updated_at?: string
+        }
+        Relationships: []
+      }
+      resumes: {
+        Row: {
+          file_name: string
+          file_path: string
+          file_size: number | null
+          id: string
+          mime_type: string | null
+          parsing_status: string | null
+          uploaded_at: string
+          user_id: string
+        }
+        Insert: {
+          file_name: string
+          file_path: string
+          file_size?: number | null
+          id?: string
+          mime_type?: string | null
+          parsing_status?: string | null
+          uploaded_at?: string
+          user_id: string
+        }
+        Update: {
+          file_name?: string
+          file_path?: string
+          file_size?: number | null
+          id?: string
+          mime_type?: string | null
+          parsing_status?: string | null
+          uploaded_at?: string
+          user_id?: string
+        }
+        Relationships: []
+      }
     }
     Views: {
       [_ in never]: never

@@ -1,12 +1,94 @@
-// Update this page (the content is just a fallback if you fail to update the page)
+
+import React, { useState } from 'react';
+import { useAuth } from '@/hooks/useAuth';
+import { AuthForm } from '@/components/auth/AuthForm';
+import { Sidebar } from '@/components/layout/Sidebar';
+import { Dashboard } from '@/components/dashboard/Dashboard';
+import { ResumeUpload } from '@/components/upload/ResumeUpload';
+import { TalentSearch } from '@/components/search/TalentSearch';
 
 const Index = () => {
-  return (
-    <div className="min-h-screen flex items-center justify-center bg-gray-100">
-      <div className="text-center">
-        <h1 className="text-4xl font-bold mb-4">Welcome to Your Blank App</h1>
-        <p className="text-xl text-gray-600">Start building your amazing project here!</p>
+  const { user, loading, signOut } = useAuth();
+  const [activeTab, setActiveTab] = useState('dashboard');
+
+  if (loading) {
+    return (
+      <div className="min-h-screen flex items-center justify-center">
+        <div className="text-center">
+          <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600 mx-auto"></div>
+          <p className="mt-2 text-gray-600">Loading...</p>
+        </div>
       </div>
+    );
+  }
+
+  if (!user) {
+    return <AuthForm />;
+  }
+
+  const renderContent = () => {
+    switch (activeTab) {
+      case 'dashboard':
+        return <Dashboard />;
+      case 'upload':
+        return <ResumeUpload />;
+      case 'search':
+        return <TalentSearch />;
+      case 'candidates':
+        return (
+          <div className="space-y-6">
+            <h2 className="text-3xl font-bold text-gray-900">My Candidates</h2>
+            <p className="text-gray-600">Manage your candidate profiles</p>
+            <div className="text-center py-12 text-gray-500">
+              <p>Candidate management coming soon</p>
+            </div>
+          </div>
+        );
+      case 'screening':
+        return (
+          <div className="space-y-6">
+            <h2 className="text-3xl font-bold text-gray-900">AI Screening</h2>
+            <p className="text-gray-600">Generate screening questions with AI</p>
+            <div className="text-center py-12 text-gray-500">
+              <p>AI screening tools coming soon</p>
+            </div>
+          </div>
+        );
+      case 'outreach':
+        return (
+          <div className="space-y-6">
+            <h2 className="text-3xl font-bold text-gray-900">Outreach</h2>
+            <p className="text-gray-600">Manage candidate outreach and communication</p>
+            <div className="text-center py-12 text-gray-500">
+              <p>Outreach tools coming soon</p>
+            </div>
+          </div>
+        );
+      case 'analytics':
+        return (
+          <div className="space-y-6">
+            <h2 className="text-3xl font-bold text-gray-900">Analytics</h2>
+            <p className="text-gray-600">View insights from your talent pool</p>
+            <div className="text-center py-12 text-gray-500">
+              <p>Analytics dashboard coming soon</p>
+            </div>
+          </div>
+        );
+      default:
+        return <Dashboard />;
+    }
+  };
+
+  return (
+    <div className="flex h-screen bg-gray-50">
+      <Sidebar 
+        activeTab={activeTab} 
+        onTabChange={setActiveTab} 
+        onSignOut={signOut}
+      />
+      <main className="flex-1 overflow-auto p-8">
+        {renderContent()}
+      </main>
     </div>
   );
 };
