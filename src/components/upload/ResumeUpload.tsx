@@ -1,8 +1,7 @@
-
 import React, { useState, useCallback } from 'react';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
-import { Upload, FileText, AlertCircle } from 'lucide-react';
+import { Upload, FileText, AlertCircle, CheckCircle, Loader } from 'lucide-react';
 import { useToast } from '@/hooks/use-toast';
 import { supabase } from '@/integrations/supabase/client';
 import { useAuth } from '@/hooks/useAuth';
@@ -10,6 +9,11 @@ import { useAuth } from '@/hooks/useAuth';
 export const ResumeUpload = () => {
   const [uploading, setUploading] = useState(false);
   const [dragOver, setDragOver] = useState(false);
+  const [uploadedFiles, setUploadedFiles] = useState<Array<{
+    id: string;
+    name: string;
+    status: 'uploading' | 'parsing' | 'completed' | 'failed';
+  }>>([]);
   const { user } = useAuth();
   const { toast } = useToast();
 
@@ -30,6 +34,14 @@ export const ResumeUpload = () => {
           continue;
         }
 
+        // Add to uploaded files list
+        const tempId = Date.now().toString();
+        setUploadedFiles(prev => [...prev, {
+          id: tempId,
+          name: file.name,
+          status: 'uploading'
+        }]);
+
         // Upload file to Supabase Storage
         const fileExt = file.name.split('.').pop();
         const fileName = `${user.id}/${Date.now()}.${fileExt}`;
@@ -41,7 +53,7 @@ export const ResumeUpload = () => {
         if (uploadError) throw uploadError;
 
         // Save resume record to database
-        const { error: dbError } = await supabase
+        const { data: resumeData, error: dbError } = await supabase
           .from('resumes')
           .insert({
             user_id: user.id,
@@ -49,14 +61,45 @@ export const ResumeUpload = () => {
             file_path: fileName,
             file_size: file.size,
             mime_type: file.type,
-          });
+            parsing_status: 'processing'
+          })
+          .select()
+          .single();
 
         if (dbError) throw dbError;
 
-        toast({
-          title: "Success",
-          description: `${file.name} uploaded successfully`,
+        // Update status to parsing
+        setUploadedFiles(prev => prev.map(f => 
+          f.id === tempId ? { ...f, id: resumeData.id, status: 'parsing' } : f
+        ));
+
+        // Trigger AI parsing
+        const { error: parseError } = await supabase.functions.invoke('parse-resume', {
+          body: { 
+            resumeId: resumeData.id, 
+            filePath: fileName 
+          }
         });
+
+        if (parseError) {
+          console.error('Parse error:', parseError);
+          setUploadedFiles(prev => prev.map(f => 
+            f.id === resumeData.id ? { ...f, status: 'failed' } : f
+          ));
+          toast({
+            title: "Parsing failed",
+            description: "Resume uploaded but AI parsing failed",
+            variant: "destructive",
+          });
+        } else {
+          setUploadedFiles(prev => prev.map(f => 
+            f.id === resumeData.id ? { ...f, status: 'completed' } : f
+          ));
+          toast({
+            title: "Success",
+            description: `${file.name} uploaded and parsed successfully`,
+          });
+        }
       }
     } catch (error: any) {
       toast({
@@ -88,6 +131,35 @@ export const ResumeUpload = () => {
     e.preventDefault();
     setDragOver(false);
   }, []);
+
+  const getStatusIcon = (status: string) => {
+    switch (status) {
+      case 'uploading':
+      case 'parsing':
+        return <Loader className="h-4 w-4 animate-spin text-blue-500" />;
+      case 'completed':
+        return <CheckCircle className="h-4 w-4 text-green-500" />;
+      case 'failed':
+        return <AlertCircle className="h-4 w-4 text-red-500" />;
+      default:
+        return null;
+    }
+  };
+
+  const getStatusText = (status: string) => {
+    switch (status) {
+      case 'uploading':
+        return 'Uploading...';
+      case 'parsing':
+        return 'AI Parsing...';
+      case 'completed':
+        return 'Ready';
+      case 'failed':
+        return 'Failed';
+      default:
+        return '';
+    }
+  };
 
   return (
     <div className="space-y-6">
@@ -131,10 +203,30 @@ export const ResumeUpload = () => {
             
             <Button asChild disabled={uploading}>
               <label htmlFor="file-upload" className="cursor-pointer">
-                {uploading ? 'Uploading...' : 'Choose Files'}
+                {uploading ? 'Processing...' : 'Choose Files'}
               </label>
             </Button>
           </div>
+
+          {uploadedFiles.length > 0 && (
+            <div className="mt-6">
+              <h4 className="text-sm font-medium text-gray-900 mb-3">Upload Progress</h4>
+              <div className="space-y-2">
+                {uploadedFiles.map((file) => (
+                  <div key={file.id} className="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
+                    <div className="flex items-center space-x-3">
+                      <FileText className="h-4 w-4 text-gray-400" />
+                      <span className="text-sm text-gray-900">{file.name}</span>
+                    </div>
+                    <div className="flex items-center space-x-2">
+                      {getStatusIcon(file.status)}
+                      <span className="text-sm text-gray-600">{getStatusText(file.status)}</span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
 
           <div className="mt-6 flex items-start space-x-2 text-sm text-gray-600">
             <AlertCircle className="h-4 w-4 mt-0.5 text-amber-500" />

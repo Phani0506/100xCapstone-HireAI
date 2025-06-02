@@ -6,6 +6,7 @@ import { Sidebar } from '@/components/layout/Sidebar';
 import { Dashboard } from '@/components/dashboard/Dashboard';
 import { ResumeUpload } from '@/components/upload/ResumeUpload';
 import { TalentSearch } from '@/components/search/TalentSearch';
+import { MyCandidates } from '@/components/candidates/MyCandidates';
 
 const Index = () => {
   const { user, loading, signOut } = useAuth();
@@ -35,15 +36,7 @@ const Index = () => {
       case 'search':
         return <TalentSearch />;
       case 'candidates':
-        return (
-          <div className="space-y-6">
-            <h2 className="text-3xl font-bold text-gray-900">My Candidates</h2>
-            <p className="text-gray-600">Manage your candidate profiles</p>
-            <div className="text-center py-12 text-gray-500">
-              <p>Candidate management coming soon</p>
-            </div>
-          </div>
-        );
+        return <MyCandidates />;
       case 'screening':
         return (
           <div className="space-y-6">
