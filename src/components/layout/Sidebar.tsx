@@ -7,7 +7,6 @@ import {
   Upload, 
   Search, 
   Users, 
-  MessageSquare, 
   BarChart3, 
   LogOut,
   BrainCircuit
@@ -25,8 +24,7 @@ export const Sidebar = ({ activeTab, onTabChange, onSignOut }: SidebarProps) => 
     { id: 'upload', label: 'Upload Resumes', icon: Upload },
     { id: 'search', label: 'Search Talent', icon: Search },
     { id: 'candidates', label: 'My Candidates', icon: Users },
-    { id: 'screening', label: 'AI Screening', icon: BrainCircuit },
-    { id: 'outreach', label: 'Outreach', icon: MessageSquare },
+    { id: 'screening', label: 'AI Screening & Outreach', icon: BrainCircuit },
     { id: 'analytics', label: 'Analytics', icon: BarChart3 },
   ];
 

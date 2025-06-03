@@ -7,6 +7,8 @@ import { Dashboard } from '@/components/dashboard/Dashboard';
 import { ResumeUpload } from '@/components/upload/ResumeUpload';
 import { TalentSearch } from '@/components/search/TalentSearch';
 import { MyCandidates } from '@/components/candidates/MyCandidates';
+import { AIScreeningAndOutreach } from '@/components/screening/AIScreeningAndOutreach';
+import { Analytics } from '@/components/analytics/Analytics';
 
 const Index = () => {
   const { user, loading, signOut } = useAuth();
@@ -38,35 +40,9 @@ const Index = () => {
       case 'candidates':
         return <MyCandidates />;
       case 'screening':
-        return (
-          <div className="space-y-6">
-            <h2 className="text-3xl font-bold text-gray-900">AI Screening</h2>
-            <p className="text-gray-600">Generate screening questions with AI</p>
-            <div className="text-center py-12 text-gray-500">
-              <p>AI screening tools coming soon</p>
-            </div>
-          </div>
-        );
-      case 'outreach':
-        return (
-          <div className="space-y-6">
-            <h2 className="text-3xl font-bold text-gray-900">Outreach</h2>
-            <p className="text-gray-600">Manage candidate outreach and communication</p>
-            <div className="text-center py-12 text-gray-500">
-              <p>Outreach tools coming soon</p>
-            </div>
-          </div>
-        );
+        return <AIScreeningAndOutreach />;
       case 'analytics':
-        return (
-          <div className="space-y-6">
-            <h2 className="text-3xl font-bold text-gray-900">Analytics</h2>
-            <p className="text-gray-600">View insights from your talent pool</p>
-            <div className="text-center py-12 text-gray-500">
-              <p>Analytics dashboard coming soon</p>
-            </div>
-          </div>
-        );
+        return <Analytics />;
       default:
         return <Dashboard />;
     }
