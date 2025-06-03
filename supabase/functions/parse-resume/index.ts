@@ -87,15 +87,15 @@ serve(async (req) => {
     
     console.log('Extracted text length:', extractedText.length)
     
-    // Aggressively truncate to minimize tokens (keep only first 2000 chars)
-    const truncatedText = extractedText.length > 2000 ? extractedText.substring(0, 2000) : extractedText
+    // Super aggressive truncation - keep only first 1000 chars
+    const truncatedText = extractedText.length > 1000 ? extractedText.substring(0, 1000) : extractedText
     console.log('Final text length for AI:', truncatedText.length)
     
     if (truncatedText.length < 10) {
       throw new Error('Could not extract readable text from the resume file')
     }
     
-    // Minimal, focused prompt to maximize output quality
+    // Ultra-minimal prompt for maximum JSON output
     const groqResponse = await fetch('https://api.groq.com/openai/v1/chat/completions', {
       method: 'POST',
       headers: {
@@ -107,44 +107,15 @@ serve(async (req) => {
         messages: [
           {
             role: 'system',
-            content: `Extract resume data as JSON:
-{
-  "full_name": "string",
-  "email": "string", 
-  "phone": "string",
-  "location": "string",
-  "summary": "string",
-  "skills": ["skill1", "skill2"],
-  "experience": [
-    {
-      "title": "string",
-      "company": "string", 
-      "duration": "string",
-      "description": "string"
-    }
-  ],
-  "education": [
-    {
-      "degree": "string",
-      "institution": "string",
-      "year": "string"
-    }
-  ]
-}
-
-Rules:
-- Name is the largest text at top (no "Name:" prefix)
-- Find sections: Skills, Experience, Education
-- Use null if field not found
-- Return only valid JSON`
+            content: 'Return only JSON. No explanation. Extract: full_name (first large text), email, phone, location, summary, skills array, experience array with title/company/duration/description, education array with degree/institution/year.'
           },
           {
             role: 'user',
-            content: truncatedText
+            content: `Extract JSON from: ${truncatedText}`
           }
         ],
         temperature: 0,
-        max_tokens: 1500,
+        max_tokens: 800,
       }),
     })
 
@@ -165,17 +136,35 @@ Rules:
     let parsedContent;
     try {
       const content = groqData.choices[0].message.content.trim()
-      console.log('AI response length:', content.length)
+      console.log('AI response:', content)
       
       // Try to extract JSON if response contains extra text
-      const jsonMatch = content.match(/\{[\s\S]*\}/)
-      const jsonString = jsonMatch ? jsonMatch[0] : content
+      let jsonString = content;
+      if (!content.startsWith('{')) {
+        const jsonMatch = content.match(/\{[\s\S]*\}/);
+        if (jsonMatch) {
+          jsonString = jsonMatch[0];
+        } else {
+          throw new Error('No JSON found in response');
+        }
+      }
       
       parsedContent = JSON.parse(jsonString)
       console.log('Successfully parsed AI response')
     } catch (parseError) {
       console.error('Failed to parse AI response:', groqData.choices[0].message.content)
-      throw new Error('Failed to parse AI response as JSON')
+      
+      // Fallback: create basic structure from text
+      parsedContent = {
+        full_name: extractNameFromText(truncatedText),
+        email: extractEmailFromText(truncatedText),
+        phone: extractPhoneFromText(truncatedText),
+        location: null,
+        summary: null,
+        skills: [],
+        experience: [],
+        education: []
+      };
     }
 
     // Get user ID from the resume record
@@ -236,13 +225,12 @@ Rules:
         { global: { headers: { Authorization: req.headers.get('Authorization')! } } }
       )
       
-      // Get resumeId from original request
-      const originalBody = await req.clone().json()
-      if (originalBody.resumeId) {
+      const requestBody = await req.json()
+      if (requestBody.resumeId) {
         await supabaseClient
           .from('resumes')
           .update({ parsing_status: 'failed' })
-          .eq('id', originalBody.resumeId)
+          .eq('id', requestBody.resumeId)
       }
     } catch (updateError) {
       console.error('Failed to update resume status:', updateError)
@@ -257,3 +245,26 @@ Rules:
     )
   }
 })
+
+// Helper functions for fallback parsing
+function extractNameFromText(text: string): string | null {
+  const lines = text.split('\n').filter(line => line.trim().length > 0);
+  // Usually the name is in the first few lines
+  for (let i = 0; i < Math.min(3, lines.length); i++) {
+    const line = lines[i].trim();
+    if (line.length > 2 && line.length < 50 && /^[A-Za-z\s]+$/.test(line)) {
+      return line;
+    }
+  }
+  return null;
+}
+
+function extractEmailFromText(text: string): string | null {
+  const emailMatch = text.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/);
+  return emailMatch ? emailMatch[0] : null;
+}
+
+function extractPhoneFromText(text: string): string | null {
+  const phoneMatch = text.match(/[\+]?[1-9]?[\d\s\-\(\)]{8,15}/);
+  return phoneMatch ? phoneMatch[0].trim() : null;
+}
