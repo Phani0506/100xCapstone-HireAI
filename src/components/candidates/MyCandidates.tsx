@@ -1,4 +1,3 @@
-
 import React, { useEffect, useState } from 'react';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -7,6 +6,7 @@ import { User, Mail, Phone, MapPin, FileText, Eye } from 'lucide-react';
 import { supabase } from '@/integrations/supabase/client';
 import { useAuth } from '@/hooks/useAuth';
 import { useToast } from '@/hooks/use-toast';
+import type { Json } from '@/integrations/supabase/types';
 
 interface Candidate {
   id: string;
@@ -15,9 +15,18 @@ interface Candidate {
   phone: string;
   location: string;
   summary: string;
-  skills_json: string[];
-  experience_json: any[];
-  education_json: any[];
+  skills_json: string[] | null;
+  experience_json: Array<{
+    title: string;
+    company: string;
+    duration: string;
+    description: string;
+  }> | null;
+  education_json: Array<{
+    degree: string;
+    institution: string;
+    year: string;
+  }> | null;
   created_at: string;
 }
 
@@ -43,7 +52,25 @@ export const MyCandidates = () => {
         .order('created_at', { ascending: false });
 
       if (error) throw error;
-      setCandidates(data || []);
+      
+      // Transform the data to match our interface
+      const transformedData: Candidate[] = (data || []).map(item => ({
+        ...item,
+        skills_json: Array.isArray(item.skills_json) ? item.skills_json as string[] : null,
+        experience_json: Array.isArray(item.experience_json) ? item.experience_json as Array<{
+          title: string;
+          company: string;
+          duration: string;
+          description: string;
+        }> : null,
+        education_json: Array.isArray(item.education_json) ? item.education_json as Array<{
+          degree: string;
+          institution: string;
+          year: string;
+        }> : null,
+      }));
+      
+      setCandidates(transformedData);
     } catch (error: any) {
       toast({
         title: "Error fetching candidates",
