@@ -1,4 +1,3 @@
-
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts"
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.7.1'
 
@@ -19,7 +18,8 @@ serve(async (req) => {
       { global: { headers: { Authorization: req.headers.get('Authorization')! } } }
     )
 
-    const { resumeId, filePath } = await req.json()
+    const requestBody = await req.json()
+    const { resumeId, filePath } = requestBody
     console.log('Processing resume:', { resumeId, filePath })
     
     // Download the resume file from storage
@@ -35,6 +35,10 @@ serve(async (req) => {
     // Convert file to text (simplified - in production you'd use proper PDF/DOC parsing)
     const fileText = await fileData.text()
     console.log('File text length:', fileText.length)
+    
+    // Truncate text if it's too long (keep first 10000 characters to stay within token limits)
+    const truncatedText = fileText.length > 10000 ? fileText.substring(0, 10000) + '...' : fileText
+    console.log('Truncated text length:', truncatedText.length)
     
     // Call Groq API for parsing
     const groqResponse = await fetch('https://api.groq.com/openai/v1/chat/completions', {
@@ -81,7 +85,7 @@ serve(async (req) => {
           },
           {
             role: 'user',
-            content: `Parse this resume text and extract the information according to the schema: ${fileText}`
+            content: `Parse this resume text and extract the information according to the schema: ${truncatedText}`
           }
         ],
         temperature: 0.1,
@@ -138,7 +142,7 @@ serve(async (req) => {
         skills_json: parsedContent.skills || [],
         experience_json: parsedContent.experience || [],
         education_json: parsedContent.education || [],
-        raw_text_content: fileText,
+        raw_text_content: truncatedText,
       })
 
     if (insertError) {
@@ -162,10 +166,10 @@ serve(async (req) => {
   } catch (error) {
     console.error('Error parsing resume:', error)
     
-    // Update resume status to failed if we have the resumeId
+    // Update resume status to failed using the original request body
     try {
-      const body = await req.clone().json()
-      if (body.resumeId) {
+      const requestBody = await req.clone().json()
+      if (requestBody.resumeId) {
         const supabaseClient = createClient(
           Deno.env.get('SUPABASE_URL') ?? '',
           Deno.env.get('SUPABASE_ANON_KEY') ?? '',
@@ -175,7 +179,7 @@ serve(async (req) => {
         await supabaseClient
           .from('resumes')
           .update({ parsing_status: 'failed' })
-          .eq('id', body.resumeId)
+          .eq('id', requestBody.resumeId)
       }
     } catch (updateError) {
       console.error('Failed to update resume status:', updateError)
