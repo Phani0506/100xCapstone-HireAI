@@ -38,12 +38,13 @@ export const TalentSearch = () => {
     
     setSearching(true);
     try {
-      // Search in parsed resume details
+      // Search in parsed resume details with proper OR conditions
+      const searchTerm = `%${searchQuery}%`;
       const { data, error } = await supabase
         .from('parsed_resume_details')
         .select('*')
         .eq('user_id', user.id)
-        .or(`full_name.ilike.%${searchQuery}%,skills_json::text.ilike.%${searchQuery}%,summary.ilike.%${searchQuery}%,raw_text_content.ilike.%${searchQuery}%`);
+        .or(`full_name.ilike.${searchTerm},summary.ilike.${searchTerm},raw_text_content.ilike.${searchTerm},skills_json::text.ilike.${searchTerm}`);
 
       if (error) throw error;
 

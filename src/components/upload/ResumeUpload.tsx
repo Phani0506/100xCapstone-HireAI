@@ -49,7 +49,26 @@ export const ResumeUpload = () => {
     if (!user) return;
     
     try {
-      // Delete from database
+      // First get the file path for storage deletion
+      const { data: resumeData, error: fetchError } = await supabase
+        .from('resumes')
+        .select('file_path')
+        .eq('id', resumeId)
+        .eq('user_id', user.id)
+        .single();
+      
+      if (fetchError) throw fetchError;
+      
+      // Delete from parsed_resume_details first (foreign key constraint)
+      const { error: parsedError } = await supabase
+        .from('parsed_resume_details')
+        .delete()
+        .eq('resume_id', resumeId)
+        .eq('user_id', user.id);
+      
+      if (parsedError) console.warn('Parsed data deletion failed:', parsedError);
+      
+      // Delete from resumes table
       const { error: dbError } = await supabase
         .from('resumes')
         .delete()
@@ -58,13 +77,15 @@ export const ResumeUpload = () => {
       
       if (dbError) throw dbError;
       
-      // Delete from storage
-      const { error: storageError } = await supabase.storage
-        .from('resumes')
-        .remove([`${user.id}/${resumeId}`]);
-      
-      if (storageError) {
-        console.warn('Storage deletion failed:', storageError);
+      // Delete from storage using the actual file path
+      if (resumeData?.file_path) {
+        const { error: storageError } = await supabase.storage
+          .from('resumes')
+          .remove([resumeData.file_path]);
+        
+        if (storageError) {
+          console.warn('Storage deletion failed:', storageError);
+        }
       }
       
       // Update UI

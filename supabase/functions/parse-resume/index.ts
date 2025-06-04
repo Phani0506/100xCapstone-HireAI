@@ -270,51 +270,45 @@ serve(async (req) => {
       throw new Error('Could not extract sufficient text from the resume file (less than 100 characters)')
     }
     
-    // Enhanced Groq API call with detailed system prompt
-    const systemPrompt = `You are an expert resume parser. Extract information from the provided resume text and return ONLY valid JSON with NO additional text, explanations, or formatting.
+    // Enhanced Groq API call with strict JSON-only system prompt
+    const systemPrompt = `You are an expert resume parsing API. Your sole function is to extract information from the provided resume text and return ONLY a valid JSON object.
 
-CRITICAL REQUIREMENTS:
-- Your response must start with { and end with }
-- NO markdown formatting, NO backticks, NO explanations
-- Use null for missing information, never use empty strings
-- For arrays, use [] if no items found
-- Be thorough in extracting all relevant information
+CRITICAL RULES:
+1. Your ENTIRE response MUST be a single, valid JSON object. It must start with { and end with }.
+2. ABSOLUTELY NO other text, explanations, apologies, conversational remarks, or markdown formatting (like \`\`\`json) should be present in your response.
+3. If specific information is not found, use JSON \`null\` for string/object fields and an empty array \`[]\` for list fields. DO NOT use empty strings "" unless the value is explicitly an empty string in the resume.
+4. Extract information as accurately as possible. Do not invent details or infer beyond what's present.
+5. For lists like skills, experience, and education, ensure they are valid JSON arrays. If multiple entries are found for experience or education, include all of them as objects within the array.
+6. Pay attention to typical resume structures:
+   * The candidate's full name is often a prominent heading at the top.
+   * Contact information (email, phone, location) is usually grouped near the name or at the end.
+   * Sections like "Skills", "Experience", "Work History", "Projects", "Education" usually have these words as headings. Extract the content listed under these headings.
+   * For experience, try to capture bullet points or paragraphs describing responsibilities and achievements for each role.
 
-REQUIRED JSON STRUCTURE:
+REQUIRED JSON STRUCTURE (Adhere strictly to this. Field names must be exact):
 {
   "full_name": "Candidate's full name or null",
-  "email": "Primary email address or null", 
+  "email": "Primary email address or null",
   "phone": "Primary phone number or null",
-  "location": "Location (City, State/Country) or null",
-  "summary": "Professional summary/objective or null",
-  "skills": ["Array of distinct skills found"],
+  "location": "Candidate's location (e.g., City, ST) or null",
+  "summary": "A brief professional summary or objective if clearly present (2-4 sentences), otherwise null",
+  "skills": ["List of distinct skills. Examples: Python, JavaScript, Project Management, Agile Methodologies"],
   "experience": [
     {
       "title": "Job title or null",
-      "company": "Company name or null", 
-      "duration": "Employment period or null",
-      "description": "Detailed job responsibilities and achievements or null"
+      "company": "Company name or null",
+      "duration": "Employment duration (e.g., Jan 2020 - Present, 05/2018 - 12/2019) or null",
+      "description": "Detailed bullet points or paragraph describing responsibilities/achievements. This can be a single string with newlines preserved, or an array of strings. Or null."
     }
   ],
   "education": [
     {
-      "degree": "Degree/qualification or null",
-      "institution": "School/university name or null",
-      "year": "Graduation year/period or null"
+      "degree": "Degree obtained (e.g., Bachelor of Science in Computer Science) or null",
+      "institution": "Name of the educational institution or null",
+      "year": "Graduation year or period (e.g., 2020, May 2019 - June 2021) or null"
     }
   ]
-}
-
-PARSING HINTS:
-- Names are often at the top, in larger text, or header sections
-- Look for email patterns: xxx@xxx.xxx
-- Phone patterns: various formats with digits, spaces, dashes, parentheses
-- Skills often under "Skills", "Technical Skills", "Competencies" sections
-- Experience under "Experience", "Work History", "Employment" sections
-- Education under "Education", "Academic Background" sections
-- Dates can be in various formats: MM/YYYY, Month Year, etc.
-
-Return ONLY the JSON object with no other text.`
+}`
 
     console.log('Calling Groq API with enhanced prompt')
     
@@ -336,8 +330,9 @@ Return ONLY the JSON object with no other text.`
             content: `Extract information from this resume text:\n\n${cleanText}`
           }
         ],
-        temperature: 0.0, // Deterministic output
-        max_tokens: 2500, // Allow for detailed JSON
+        temperature: 0.0, // Deterministic output for consistent parsing
+        max_tokens: 3500, // Allow for detailed JSON with comprehensive descriptions
+        top_p: 0.1, // Focus on most likely responses
       }),
     })
 
