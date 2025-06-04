@@ -1,10 +1,13 @@
 
-import React from 'react';
+import React, { useState, useEffect } from 'react';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Users, FileText, Search, TrendingUp } from 'lucide-react';
+import { supabase } from '@/integrations/supabase/client';
+import { useAuth } from '@/hooks/useAuth';
 
 export const Dashboard = () => {
-  const stats = [
+  const { user } = useAuth();
+  const [stats, setStats] = useState([
     {
       title: "Total Resumes",
       value: "0",
@@ -33,7 +36,67 @@ export const Dashboard = () => {
       icon: TrendingUp,
       color: "text-orange-600"
     }
-  ];
+  ]);
+
+  const [recentActivity, setRecentActivity] = useState<Array<{
+    id: string;
+    file_name: string;
+    parsing_status: string;
+    created_at: string;
+  }>>([]);
+
+  useEffect(() => {
+    if (user) {
+      fetchDashboardData();
+    }
+  }, [user]);
+
+  const fetchDashboardData = async () => {
+    if (!user) return;
+
+    try {
+      // Fetch resume count
+      const { data: resumes, error: resumesError } = await supabase
+        .from('resumes')
+        .select('id')
+        .eq('user_id', user.id);
+
+      if (resumesError) throw resumesError;
+
+      // Fetch parsed candidates count
+      const { data: parsed, error: parsedError } = await supabase
+        .from('parsed_resume_details')
+        .select('id')
+        .eq('user_id', user.id);
+
+      if (parsedError) throw parsedError;
+
+      // Fetch recent activity
+      const { data: recent, error: recentError } = await supabase
+        .from('resumes')
+        .select('id, file_name, parsing_status, created_at')
+        .eq('user_id', user.id)
+        .order('created_at', { ascending: false })
+        .limit(5);
+
+      if (recentError) throw recentError;
+
+      const totalResumes = resumes?.length || 0;
+      const totalParsed = parsed?.length || 0;
+      const successRate = totalResumes > 0 ? Math.round((totalParsed / totalResumes) * 100) : 0;
+
+      setStats(prev => [
+        { ...prev[0], value: totalResumes.toString() },
+        { ...prev[1], value: totalParsed.toString() },
+        { ...prev[2], value: "0" }, // Will track searches later
+        { ...prev[3], value: `${successRate}%` }
+      ]);
+
+      setRecentActivity(recent || []);
+    } catch (error) {
+      console.error('Error fetching dashboard data:', error);
+    }
+  };
 
   return (
     <div className="space-y-6">
@@ -88,11 +151,36 @@ export const Dashboard = () => {
             <CardDescription>Your latest actions</CardDescription>
           </CardHeader>
           <CardContent>
-            <div className="text-center py-8 text-gray-500">
-              <FileText className="mx-auto h-12 w-12 text-gray-300" />
-              <p className="mt-2">No activity yet</p>
-              <p className="text-sm">Upload your first resume to get started</p>
-            </div>
+            {recentActivity.length > 0 ? (
+              <div className="space-y-3">
+                {recentActivity.map((item) => (
+                  <div key={item.id} className="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
+                    <div className="flex items-center space-x-3">
+                      <FileText className="h-4 w-4 text-gray-400" />
+                      <div>
+                        <p className="text-sm font-medium text-gray-900">{item.file_name}</p>
+                        <p className="text-xs text-gray-500">
+                          {new Date(item.created_at).toLocaleDateString()}
+                        </p>
+                      </div>
+                    </div>
+                    <span className={`text-xs px-2 py-1 rounded ${
+                      item.parsing_status === 'completed' ? 'bg-green-100 text-green-700' :
+                      item.parsing_status === 'processing' ? 'bg-blue-100 text-blue-700' :
+                      'bg-red-100 text-red-700'
+                    }`}>
+                      {item.parsing_status || 'pending'}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="text-center py-8 text-gray-500">
+                <FileText className="mx-auto h-12 w-12 text-gray-300" />
+                <p className="mt-2">No activity yet</p>
+                <p className="text-sm">Upload your first resume to get started</p>
+              </div>
+            )}
           </CardContent>
         </Card>
       </div>

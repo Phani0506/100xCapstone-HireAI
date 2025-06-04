@@ -94,33 +94,39 @@ export type Database = {
       }
       resumes: {
         Row: {
+          created_at: string
           file_name: string
           file_path: string
           file_size: number | null
           id: string
           mime_type: string | null
+          parsed_data: Json | null
           parsing_status: string | null
-          uploaded_at: string
+          skills_extracted: string[] | null
           user_id: string
         }
         Insert: {
+          created_at?: string
           file_name: string
           file_path: string
           file_size?: number | null
           id?: string
           mime_type?: string | null
+          parsed_data?: Json | null
           parsing_status?: string | null
-          uploaded_at?: string
+          skills_extracted?: string[] | null
           user_id: string
         }
         Update: {
+          created_at?: string
           file_name?: string
           file_path?: string
           file_size?: number | null
           id?: string
           mime_type?: string | null
+          parsed_data?: Json | null
           parsing_status?: string | null
-          uploaded_at?: string
+          skills_extracted?: string[] | null
           user_id?: string
         }
         Relationships: []

@@ -1,7 +1,7 @@
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useEffect } from 'react';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
-import { Upload, FileText, AlertCircle, CheckCircle, Loader } from 'lucide-react';
+import { Upload, FileText, AlertCircle, CheckCircle, Loader, Trash2 } from 'lucide-react';
 import { useToast } from '@/hooks/use-toast';
 import { supabase } from '@/integrations/supabase/client';
 import { useAuth } from '@/hooks/useAuth';
@@ -14,8 +14,73 @@ export const ResumeUpload = () => {
     name: string;
     status: 'uploading' | 'parsing' | 'completed' | 'failed';
   }>>([]);
+  const [existingResumes, setExistingResumes] = useState<Array<{
+    id: string;
+    file_name: string;
+    parsing_status: string;
+    created_at: string;
+  }>>([]);
   const { user } = useAuth();
   const { toast } = useToast();
+
+  useEffect(() => {
+    if (user) {
+      fetchExistingResumes();
+    }
+  }, [user]);
+
+  const fetchExistingResumes = async () => {
+    if (!user) return;
+    
+    const { data, error } = await supabase
+      .from('resumes')
+      .select('id, file_name, parsing_status, created_at')
+      .eq('user_id', user.id)
+      .order('created_at', { ascending: false });
+    
+    if (error) {
+      console.error('Error fetching resumes:', error);
+    } else {
+      setExistingResumes(data || []);
+    }
+  };
+
+  const handleDeleteResume = async (resumeId: string, fileName: string) => {
+    if (!user) return;
+    
+    try {
+      // Delete from database
+      const { error: dbError } = await supabase
+        .from('resumes')
+        .delete()
+        .eq('id', resumeId)
+        .eq('user_id', user.id);
+      
+      if (dbError) throw dbError;
+      
+      // Delete from storage
+      const { error: storageError } = await supabase.storage
+        .from('resumes')
+        .remove([`${user.id}/${resumeId}`]);
+      
+      if (storageError) {
+        console.warn('Storage deletion failed:', storageError);
+      }
+      
+      // Update UI
+      setExistingResumes(prev => prev.filter(r => r.id !== resumeId));
+      toast({
+        title: "Success",
+        description: `${fileName} deleted successfully`,
+      });
+    } catch (error: any) {
+      toast({
+        title: "Delete failed",
+        description: error.message,
+        variant: "destructive",
+      });
+    }
+  };
 
   const handleFileUpload = async (files: FileList) => {
     if (!user) return;
@@ -109,6 +174,8 @@ export const ResumeUpload = () => {
       });
     } finally {
       setUploading(false);
+      // Refresh existing resumes list
+      fetchExistingResumes();
     }
   };
 
@@ -221,6 +288,44 @@ export const ResumeUpload = () => {
                     <div className="flex items-center space-x-2">
                       {getStatusIcon(file.status)}
                       <span className="text-sm text-gray-600">{getStatusText(file.status)}</span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {existingResumes.length > 0 && (
+            <div className="mt-6">
+              <h4 className="text-sm font-medium text-gray-900 mb-3">Uploaded Resumes</h4>
+              <div className="space-y-2">
+                {existingResumes.map((resume) => (
+                  <div key={resume.id} className="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
+                    <div className="flex items-center space-x-3">
+                      <FileText className="h-4 w-4 text-gray-400" />
+                      <div>
+                        <span className="text-sm text-gray-900">{resume.file_name}</span>
+                        <p className="text-xs text-gray-500">
+                          {new Date(resume.created_at).toLocaleDateString()}
+                        </p>
+                      </div>
+                    </div>
+                    <div className="flex items-center space-x-2">
+                      <span className={`text-xs px-2 py-1 rounded ${
+                        resume.parsing_status === 'completed' ? 'bg-green-100 text-green-700' :
+                        resume.parsing_status === 'processing' ? 'bg-blue-100 text-blue-700' :
+                        'bg-red-100 text-red-700'
+                      }`}>
+                        {resume.parsing_status || 'pending'}
+                      </span>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => handleDeleteResume(resume.id, resume.file_name)}
+                        className="text-red-600 hover:text-red-700 hover:bg-red-50"
+                      >
+                        <Trash2 className="h-4 w-4" />
+                      </Button>
                     </div>
                   </div>
                 ))}
