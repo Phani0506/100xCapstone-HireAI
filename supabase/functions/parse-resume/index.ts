@@ -8,34 +8,68 @@ const corsHeaders = {
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
 }
 
-// Enhanced PDF text extraction using pdf.js
+// Enhanced PDF text extraction with safety mechanisms
 async function extractTextFromPDF(arrayBuffer: ArrayBuffer): Promise<string> {
   try {
     console.log('Starting PDF extraction with pdf.js')
     
-    // Configure pdf.js worker
+    // Limit PDF size to prevent memory issues (10MB)
+    if (arrayBuffer.byteLength > 10 * 1024 * 1024) {
+      console.warn('PDF file too large, falling back to basic extraction')
+      throw new Error('PDF file too large for pdf.js processing')
+    }
+    
+    // Configure pdf.js worker with error handling
     pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://esm.sh/pdfjs-dist@3.11.174/build/pdf.worker.min.js'
     
     const typedArray = new Uint8Array(arrayBuffer)
-    const pdf = await pdfjsLib.getDocument(typedArray).promise
+    
+    // Add timeout to prevent hanging
+    const pdfPromise = pdfjsLib.getDocument({
+      data: typedArray,
+      verbosity: 0, // Reduce logging
+      maxImageSize: 1024 * 1024, // Limit image size
+    }).promise
+    
+    const timeoutPromise = new Promise((_, reject) => 
+      setTimeout(() => reject(new Error('PDF parsing timeout')), 30000)
+    )
+    
+    const pdf = await Promise.race([pdfPromise, timeoutPromise]) as any
     
     console.log(`PDF loaded successfully, ${pdf.numPages} pages found`)
     
+    // Limit number of pages to process
+    const maxPages = Math.min(pdf.numPages, 20)
     let fullText = ''
     
-    // Extract text from each page
-    for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
+    // Extract text from each page with individual timeouts
+    for (let pageNum = 1; pageNum <= maxPages; pageNum++) {
       try {
-        const page = await pdf.getPage(pageNum)
-        const textContent = await page.getTextContent()
+        const pagePromise = pdf.getPage(pageNum)
+        const pageTimeoutPromise = new Promise((_, reject) => 
+          setTimeout(() => reject(new Error(`Page ${pageNum} timeout`)), 10000)
+        )
         
-        // Combine all text items from the page
-        const pageText = textContent.items
-          .map((item: any) => item.str || '')
-          .join(' ')
+        const page = await Promise.race([pagePromise, pageTimeoutPromise]) as any
         
-        fullText += pageText + '\n'
-        console.log(`Page ${pageNum} extracted: ${pageText.length} characters`)
+        const textContentPromise = page.getTextContent()
+        const textTimeoutPromise = new Promise((_, reject) => 
+          setTimeout(() => reject(new Error(`Text extraction timeout for page ${pageNum}`)), 5000)
+        )
+        
+        const textContent = await Promise.race([textContentPromise, textTimeoutPromise]) as any
+        
+        // Safely extract text items
+        if (textContent && textContent.items && Array.isArray(textContent.items)) {
+          const pageText = textContent.items
+            .filter((item: any) => item && typeof item.str === 'string')
+            .map((item: any) => item.str)
+            .join(' ')
+          
+          fullText += pageText + '\n'
+          console.log(`Page ${pageNum} extracted: ${pageText.length} characters`)
+        }
       } catch (pageError) {
         console.error(`Error extracting page ${pageNum}:`, pageError)
         continue
@@ -48,43 +82,78 @@ async function extractTextFromPDF(arrayBuffer: ArrayBuffer): Promise<string> {
   } catch (error) {
     console.error('PDF.js extraction failed, attempting fallback:', error)
     
-    // Fallback to basic extraction
+    // Enhanced fallback extraction
     try {
-      const uint8Array = new Uint8Array(arrayBuffer)
-      let text = ''
-      
-      // Convert bytes to string and look for text patterns
-      const pdfText = String.fromCharCode(...uint8Array)
-      
-      // Extract text between parentheses (common PDF text storage)
-      const textMatches = pdfText.match(/\((.*?)\)/g) || []
-      textMatches.forEach(match => {
-        const cleaned = match.slice(1, -1)
-          .replace(/\\[rnt]/g, ' ')
-          .replace(/\\/g, '')
-          .trim()
-        if (cleaned.length > 2 && /[a-zA-Z]/.test(cleaned)) {
-          text += cleaned + ' '
-        }
-      })
-      
-      // Also try to extract from stream objects
-      const streamMatches = pdfText.match(/stream(.*?)endstream/gs) || []
-      streamMatches.forEach(match => {
-        const content = match.replace(/^stream/, '').replace(/endstream$/, '')
-        const cleanContent = content.replace(/[^\x20-\x7E\n]/g, ' ').trim()
-        if (cleanContent.length > 10) {
-          text += cleanContent + ' '
-        }
-      })
-      
-      console.log(`Fallback PDF extraction: ${text.length} characters`)
-      return text.trim()
-      
+      return await fallbackPDFExtraction(arrayBuffer)
     } catch (fallbackError) {
       console.error('Fallback PDF extraction also failed:', fallbackError)
       return ''
     }
+  }
+}
+
+// Fallback PDF text extraction
+async function fallbackPDFExtraction(arrayBuffer: ArrayBuffer): Promise<string> {
+  console.log('Starting fallback PDF extraction')
+  
+  const uint8Array = new Uint8Array(arrayBuffer)
+  let text = ''
+  
+  try {
+    // Limit processing to prevent memory issues
+    const maxBytes = Math.min(uint8Array.length, 5 * 1024 * 1024) // 5MB limit
+    const limitedArray = uint8Array.slice(0, maxBytes)
+    
+    // Convert to string safely
+    const pdfText = String.fromCharCode.apply(null, Array.from(limitedArray))
+    
+    // Extract text between parentheses (common PDF text storage)
+    const textMatches = pdfText.match(/\((.*?)\)/g) || []
+    const extractedTexts = new Set<string>() // Use Set to avoid duplicates
+    
+    textMatches.forEach(match => {
+      try {
+        const cleaned = match.slice(1, -1)
+          .replace(/\\[rnt]/g, ' ')
+          .replace(/\\/g, '')
+          .trim()
+        if (cleaned.length > 2 && cleaned.length < 200 && /[a-zA-Z]/.test(cleaned)) {
+          extractedTexts.add(cleaned)
+        }
+      } catch (e) {
+        // Skip problematic matches
+      }
+    })
+    
+    // Also try to extract from stream objects
+    const streamMatches = pdfText.match(/stream[\s\S]*?endstream/g) || []
+    streamMatches.slice(0, 50).forEach(match => { // Limit to first 50 streams
+      try {
+        const content = match.replace(/^stream/, '').replace(/endstream$/, '')
+        const cleanContent = content
+          .replace(/[^\x20-\x7E\n]/g, ' ')
+          .replace(/\s+/g, ' ')
+          .trim()
+        if (cleanContent.length > 10 && cleanContent.length < 500) {
+          // Look for readable text patterns
+          const readableText = cleanContent.match(/[a-zA-Z][a-zA-Z\s]{10,}/g)
+          if (readableText) {
+            readableText.forEach(t => extractedTexts.add(t.trim()))
+          }
+        }
+      } catch (e) {
+        // Skip problematic streams
+      }
+    })
+    
+    text = Array.from(extractedTexts).join(' ')
+    
+    console.log(`Fallback PDF extraction: ${text.length} characters`)
+    return text.trim()
+    
+  } catch (error) {
+    console.error('Error in fallback extraction:', error)
+    return ''
   }
 }
 
@@ -185,7 +254,12 @@ serve(async (req) => {
     return new Response(null, { headers: corsHeaders })
   }
 
+  let requestBody: any
   try {
+    // Parse request body once and reuse it
+    requestBody = await req.json()
+    const { resumeId, filePath } = requestBody
+
     const supabaseClient = createClient(
       Deno.env.get('SUPABASE_URL') ?? '',
       Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '', // Use service role for admin operations
@@ -195,9 +269,6 @@ serve(async (req) => {
         } 
       }
     )
-
-    const requestBody = await req.json()
-    const { resumeId, filePath } = requestBody
     console.log('Processing resume:', { resumeId, filePath })
     
     // Download the resume file from storage
@@ -461,8 +532,7 @@ REQUIRED JSON STRUCTURE (Adhere strictly to this. Field names must be exact):
         Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? ''
       )
       
-      const requestBody = await req.json()
-      if (requestBody.resumeId) {
+      if (requestBody?.resumeId) {
         const status = error.message.includes('insufficient text') ? 'failed_no_text' : 'failed_exception'
         await supabaseClient
           .from('resumes')
