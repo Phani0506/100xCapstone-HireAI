@@ -1,547 +1,197 @@
-import { serve } from "https://deno.land/std@0.168.0/http/server.ts"
-import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.7.1'
-import * as pdfjsLib from 'https://esm.sh/pdfjs-dist@3.11.174'
-import { extract } from 'https://deno.land/std@0.208.0/archive/unzip.ts'
+import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
+import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.7.1';
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
-}
+  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type'
+};
 
-// Enhanced PDF text extraction with better error handling
-async function extractTextFromPDF(arrayBuffer: ArrayBuffer): Promise<string> {
+// A best-effort PDF text extraction function.
+// WARNING: This is highly unreliable for complex or compressed PDFs.
+// It attempts to find plain text streams, but may miss a lot of content.
+// For production, a dedicated PDF parsing library or service is recommended.
+async function extractTextFromPDF(arrayBuffer) {
   try {
-    console.log('Starting PDF extraction with pdf.js')
+    const uint8Array = new Uint8Array(arrayBuffer);
+    let text = '';
     
-    // Limit PDF size to prevent memory issues (5MB for safer processing)
-    if (arrayBuffer.byteLength > 5 * 1024 * 1024) {
-      console.warn('PDF file too large, using fallback extraction')
-      return await fallbackPDFExtraction(arrayBuffer)
+    // Convert bytes to a string-like representation to find text patterns
+    // This is a simplified approach and might not work for all encodings
+    let pdfAsString = '';
+    for (let i = 0; i < uint8Array.length; i++) {
+        pdfAsString += String.fromCharCode(uint8Array[i]);
     }
-    
-    // Use a simpler, more reliable PDF extraction approach
-    try {
-      const uint8Array = new Uint8Array(arrayBuffer)
-      
-      // Try to extract text using a basic string search approach first
-      let extractedText = await basicPDFTextExtraction(uint8Array)
-      
-      if (extractedText && extractedText.length > 100) {
-        console.log(`Basic PDF extraction successful: ${extractedText.length} characters`)
-        return extractedText
-      }
-      
-      // If basic extraction fails, try pdf.js
-      pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://esm.sh/pdfjs-dist@3.11.174/build/pdf.worker.min.js'
-      
-      const loadingTask = pdfjsLib.getDocument({
-        data: uint8Array,
-        verbosity: 0,
-        maxImageSize: 512 * 1024, // Smaller limit
-        disableFontFace: true, // Disable font loading for stability
-        disableRange: true, // Disable range requests
-        disableStream: true, // Disable streaming
-      })
-      
-      const pdf = await Promise.race([
-        loadingTask.promise,
-        new Promise((_, reject) => setTimeout(() => reject(new Error('PDF loading timeout')), 15000))
-      ]) as any
-      
-      console.log(`PDF loaded successfully, ${pdf.numPages} pages found`)
-      
-      let fullText = ''
-      const maxPages = Math.min(pdf.numPages, 5) // Process fewer pages for reliability
-      
-      for (let pageNum = 1; pageNum <= maxPages; pageNum++) {
-        try {
-          const page = await Promise.race([
-            pdf.getPage(pageNum),
-            new Promise((_, reject) => setTimeout(() => reject(new Error(`Page ${pageNum} timeout`)), 5000))
-          ]) as any
-          
-          const textContent = await Promise.race([
-            page.getTextContent({ normalizeWhitespace: true }),
-            new Promise((_, reject) => setTimeout(() => reject(new Error(`Text content timeout for page ${pageNum}`)), 3000))
-          ]) as any
-          
-          if (textContent?.items?.length) {
-            const pageText = textContent.items
-              .filter((item: any) => item?.str && typeof item.str === 'string' && item.str.trim())
-              .map((item: any) => item.str.trim())
-              .join(' ')
-            
-            if (pageText.length > 10) {
-              fullText += pageText + '\n'
-              console.log(`Page ${pageNum} extracted: ${pageText.length} characters`)
-            }
-          }
-        } catch (pageError) {
-          console.error(`Error on page ${pageNum}:`, pageError)
-          continue
-        }
-      }
-      
-      if (fullText.length > 50) {
-        console.log(`PDF.js extraction successful: ${fullText.length} characters`)
-        return fullText.trim()
-      }
-      
-    } catch (pdfjsError) {
-      console.error('PDF.js failed:', pdfjsError)
-    }
-    
-    // Fallback to basic extraction
-    return await fallbackPDFExtraction(arrayBuffer)
-    
-  } catch (error) {
-    console.error('All PDF extraction methods failed:', error)
-    return await fallbackPDFExtraction(arrayBuffer)
-  }
-}
 
-// Basic PDF text extraction using string patterns
-async function basicPDFTextExtraction(uint8Array: Uint8Array): Promise<string> {
-  try {
-    console.log('Trying basic PDF text extraction')
+    // Attempt to extract text from stream objects, which is where content often lives
+    const streamMatches = pdfAsString.match(/stream([\s\S]*?)endstream/g) || [];
     
-    // Convert to string for pattern matching
-    const pdfString = String.fromCharCode.apply(null, Array.from(uint8Array.slice(0, Math.min(uint8Array.length, 2 * 1024 * 1024))))
-    
-    // Look for text between common PDF text markers
-    const textPatterns = [
-      /BT\s+(.*?)\s+ET/gs, // Text between BT and ET markers
-      /\[(.*?)\]/g, // Text in brackets
-      /\((.*?)\)/g, // Text in parentheses
-    ]
-    
-    let extractedText = ''
-    const foundTexts = new Set<string>()
-    
-    for (const pattern of textPatterns) {
-      const matches = pdfString.match(pattern) || []
-      for (const match of matches.slice(0, 100)) { // Limit matches
-        let cleanText = match
-          .replace(/BT|ET|\[|\]|\(|\)/g, '')
-          .replace(/\\[rnt]/g, ' ')
-          .replace(/[^\x20-\x7E\s]/g, ' ')
-          .replace(/\s+/g, ' ')
-          .trim()
+    for (const stream of streamMatches) {
+      // Basic cleaning of stream content
+      const content = stream
+        .replace(/^stream\r?\n/, '')
+        .replace(/\r?\nendstream$/, '');
+
+      // Look for text within parentheses, a common pattern in PDF content (TJ operator)
+      const textMatches = content.match(/\((.*?)\)/g) || [];
+      textMatches.forEach((match) => {
+        const cleaned = match
+          .slice(1, -1) // Remove parentheses
+          .replace(/\\(r|n|t)/g, ' ') // Replace escape sequences
+          .replace(/\\/g, '') // Remove other backslashes
+          .trim();
         
-        if (cleanText.length > 3 && cleanText.length < 200 && /[a-zA-Z]/.test(cleanText)) {
-          foundTexts.add(cleanText)
+        // Add if it looks like meaningful text
+        if (cleaned.length > 2 && /[a-zA-Z]/.test(cleaned)) {
+          text += cleaned + ' ';
         }
-      }
+      });
     }
-    
-    extractedText = Array.from(foundTexts).join(' ')
-    console.log(`Basic extraction found: ${extractedText.length} characters`)
-    
-    return extractedText
+
+    // Final cleanup
+    text = text.replace(/\s+/g, ' ').trim();
+    console.log(`Extracted ${text.length} characters from PDF.`);
+    return text;
   } catch (error) {
-    console.error('Basic PDF extraction failed:', error)
-    return ''
+    console.error('PDF extraction error:', error);
+    return '';
   }
 }
 
-// Fallback PDF text extraction
-async function fallbackPDFExtraction(arrayBuffer: ArrayBuffer): Promise<string> {
-  console.log('Starting fallback PDF extraction')
-  
-  const uint8Array = new Uint8Array(arrayBuffer)
-  let text = ''
-  
-  try {
-    // Limit processing to prevent memory issues
-    const maxBytes = Math.min(uint8Array.length, 5 * 1024 * 1024) // 5MB limit
-    const limitedArray = uint8Array.slice(0, maxBytes)
-    
-    // Convert to string safely
-    const pdfText = String.fromCharCode.apply(null, Array.from(limitedArray))
-    
-    // Extract text between parentheses (common PDF text storage)
-    const textMatches = pdfText.match(/\((.*?)\)/g) || []
-    const extractedTexts = new Set<string>() // Use Set to avoid duplicates
-    
-    textMatches.forEach(match => {
-      try {
-        const cleaned = match.slice(1, -1)
-          .replace(/\\[rnt]/g, ' ')
-          .replace(/\\/g, '')
-          .trim()
-        if (cleaned.length > 2 && cleaned.length < 200 && /[a-zA-Z]/.test(cleaned)) {
-          extractedTexts.add(cleaned)
-        }
-      } catch (e) {
-        // Skip problematic matches
-      }
-    })
-    
-    // Also try to extract from stream objects
-    const streamMatches = pdfText.match(/stream[\s\S]*?endstream/g) || []
-    streamMatches.slice(0, 50).forEach(match => { // Limit to first 50 streams
-      try {
-        const content = match.replace(/^stream/, '').replace(/endstream$/, '')
-        const cleanContent = content
-          .replace(/[^\x20-\x7E\n]/g, ' ')
-          .replace(/\s+/g, ' ')
-          .trim()
-        if (cleanContent.length > 10 && cleanContent.length < 500) {
-          // Look for readable text patterns
-          const readableText = cleanContent.match(/[a-zA-Z][a-zA-Z\s]{10,}/g)
-          if (readableText) {
-            readableText.forEach(t => extractedTexts.add(t.trim()))
-          }
-        }
-      } catch (e) {
-        // Skip problematic streams
-      }
-    })
-    
-    text = Array.from(extractedTexts).join(' ')
-    
-    console.log(`Fallback PDF extraction: ${text.length} characters`)
-    return text.trim()
-    
-  } catch (error) {
-    console.error('Error in fallback extraction:', error)
-    return ''
-  }
+// Helper functions for fallback parsing (if AI fails)
+function extractEmailFromText(text) {
+  const match = text.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/);
+  return match ? match[0] : null;
 }
-
-// Enhanced DOCX text extraction using ZIP reader
-async function extractTextFromDOCX(arrayBuffer: ArrayBuffer): Promise<string> {
-  try {
-    console.log('Starting DOCX extraction')
-    
-    // Create a temporary file for ZIP extraction
-    const tempFileName = `/tmp/temp_docx_${Date.now()}.docx`
-    await Deno.writeFile(tempFileName, new Uint8Array(arrayBuffer))
-    
-    let documentXml = ''
-    
-    // Extract the ZIP contents
-    for await (const entry of extract(tempFileName)) {
-      if (entry.name === 'word/document.xml') {
-        const content = new TextDecoder().decode(entry.content)
-        documentXml = content
-        break
-      }
-    }
-    
-    // Clean up temp file
-    try {
-      await Deno.remove(tempFileName)
-    } catch {
-      // Ignore cleanup errors
-    }
-    
-    if (!documentXml) {
-      throw new Error('Could not find document.xml in DOCX file')
-    }
-    
-    // Extract text from XML - look for <w:t> elements
-    const textMatches = documentXml.match(/<w:t[^>]*>([^<]*)<\/w:t>/g) || []
-    const extractedText = textMatches
-      .map(match => {
-        const textContent = match.replace(/<w:t[^>]*>/, '').replace(/<\/w:t>/, '')
-        return textContent.trim()
-      })
-      .filter(text => text.length > 0)
-      .join(' ')
-    
-    // Also try to extract from paragraph text elements
-    const paragraphMatches = documentXml.match(/<w:p\b[^>]*>.*?<\/w:p>/gs) || []
-    const paragraphText = paragraphMatches
-      .map(match => {
-        const textElements = match.match(/<w:t[^>]*>([^<]*)<\/w:t>/g) || []
-        return textElements
-          .map(textEl => textEl.replace(/<w:t[^>]*>/, '').replace(/<\/w:t>/, ''))
-          .join(' ')
-      })
-      .filter(text => text.trim().length > 0)
-      .join('\n')
-    
-    const finalText = paragraphText || extractedText
-    console.log(`DOCX text extracted: ${finalText.length} characters`)
-    
-    return finalText.trim()
-    
-  } catch (error) {
-    console.error('DOCX extraction error:', error)
-    return ''
-  }
+function extractPhoneFromText(text) {
+    // A more robust regex for various phone formats
+    const match = text.match(/(?:\+?\d{1,3}[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}/);
+    return match ? match[0] : null;
 }
-
-// Enhanced DOC file text extraction
-async function extractTextFromDOC(arrayBuffer: ArrayBuffer): Promise<string> {
-  try {
-    console.log('Starting DOC extraction (basic)')
-    
-    const uint8Array = new Uint8Array(arrayBuffer)
-    const text = new TextDecoder('utf-8', { fatal: false }).decode(uint8Array)
-    
-    // Filter out binary noise and extract readable sequences
-    const readableText = text
-      .replace(/[\x00-\x1F\x7F-\x9F]/g, ' ') // Remove control characters
-      .replace(/[^\x20-\x7E\s]/g, ' ') // Keep only printable ASCII and whitespace
-      .replace(/\s+/g, ' ') // Normalize whitespace
-      .trim()
-    
-    // Extract sequences that look like readable text
-    const readableSequences = readableText.match(/[a-zA-Z0-9\s@.,;:'"!?()-]{10,}/g) || []
-    const extractedText = readableSequences.join(' ').trim()
-    
-    console.log(`DOC text extracted: ${extractedText.length} characters`)
-    return extractedText
-    
-  } catch (error) {
-    console.error('DOC extraction error:', error)
-    return ''
-  }
-}
+// Add other simple regex-based fallbacks if needed...
 
 serve(async (req) => {
   if (req.method === 'OPTIONS') {
-    return new Response(null, { headers: corsHeaders })
+    return new Response(null, { headers: corsHeaders });
   }
 
-  let requestBody: any
+  // Define these outside the try block so they are accessible in the catch block
+  let resumeId;
+
   try {
-    // Parse request body once and reuse it
-    requestBody = await req.json()
-    const { resumeId, filePath } = requestBody
+    const requestBody = await req.json();
+    resumeId = requestBody.resumeId; // Assign here
+    const { filePath } = requestBody;
+
+    if (!resumeId || !filePath) {
+      throw new Error('Missing resumeId or filePath in the request body.');
+    }
+    
+    console.log('Processing resume:', { resumeId, filePath });
 
     const supabaseClient = createClient(
       Deno.env.get('SUPABASE_URL') ?? '',
-      Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '', // Use service role for admin operations
-      { 
-        global: { 
-          headers: { Authorization: req.headers.get('Authorization')! } 
-        } 
-      }
-    )
-    console.log('Processing resume:', { resumeId, filePath })
-    
-    // Download the resume file from storage
-    const { data: fileData, error: downloadError } = await supabaseClient.storage
+      Deno.env.get('SUPABASE_ANON_KEY') ?? '',
+      { global: { headers: { Authorization: req.headers.get('Authorization')! } } }
+    );
+
+    const { data: fileData, error: downloadError } = await supabaseClient
+      .storage
       .from('resumes')
-      .download(filePath)
+      .download(filePath);
 
     if (downloadError) {
-      console.error('Download error:', downloadError)
-      throw new Error(`Failed to download file: ${downloadError.message}`)
+      throw new Error(`Failed to download file: ${downloadError.message}`);
     }
 
-    let rawExtractedText = ''
-    const lowerFilePath = filePath.toLowerCase()
-    
-    console.log(`Processing file type for: ${filePath}`)
-    
-    // Handle different file types with enhanced extraction
+    let extractedText = '';
+    const lowerFilePath = filePath.toLowerCase();
+
     if (lowerFilePath.endsWith('.pdf')) {
-      console.log('Processing PDF file with pdf.js')
-      const arrayBuffer = await fileData.arrayBuffer()
-      rawExtractedText = await extractTextFromPDF(arrayBuffer)
-    } else if (lowerFilePath.endsWith('.docx')) {
-      console.log('Processing DOCX file with ZIP extraction')
-      const arrayBuffer = await fileData.arrayBuffer()
-      rawExtractedText = await extractTextFromDOCX(arrayBuffer)
-    } else if (lowerFilePath.endsWith('.doc')) {
-      console.log('Processing DOC file')
-      const arrayBuffer = await fileData.arrayBuffer()
-      rawExtractedText = await extractTextFromDOC(arrayBuffer)
+      console.log('Processing PDF file...');
+      const arrayBuffer = await fileData.arrayBuffer();
+      extractedText = await extractTextFromPDF(arrayBuffer);
     } else if (lowerFilePath.endsWith('.txt')) {
-      console.log('Processing TXT file')
-      rawExtractedText = await fileData.text()
+      console.log('Processing TXT file...');
+      extractedText = await fileData.text();
     } else {
-      // Try to process as text
-      rawExtractedText = await fileData.text()
+      // Reject unsupported files like .doc, .docx, .pages, etc.
+      throw new Error(`Unsupported file type: ${filePath}. Please upload a PDF or TXT file.`);
     }
-    
-    console.log('Raw extracted text (first 500 chars):', rawExtractedText.substring(0, 500))
-    console.log('Total raw extracted text length:', rawExtractedText.length)
-    
-    // Clean and prepare text for AI processing
-    let cleanText = rawExtractedText
-      .replace(/\s+/g, ' ') // Normalize whitespace
-      .replace(/[^\w\s@.,()-]/g, ' ') // Keep more punctuation for better parsing
-      .trim()
-    
-    console.log('Raw text sample (first 200 chars):', rawExtractedText.substring(0, 200))
-    console.log('Initial cleaned text length:', cleanText.length)
-    
-    // If text is too short, try to extract more aggressively
-    if (cleanText.length < 200 && rawExtractedText.length > 50) {
-      console.log('Text too short, trying aggressive extraction')
-      cleanText = rawExtractedText
-        .replace(/[^\x20-\x7E\s]/g, ' ') // Keep only printable ASCII
-        .replace(/\s+/g, ' ')
-        .trim()
-    }
-    
-    // Limit text for LLM processing
-    const maxTextLength = 15000
-    if (cleanText.length > maxTextLength) {
-      cleanText = cleanText.substring(0, maxTextLength)
-      const lastSpace = cleanText.lastIndexOf(' ')
-      if (lastSpace > maxTextLength * 0.8) {
-        cleanText = cleanText.substring(0, lastSpace)
-      }
-    }
-    
-    console.log('Final cleaned text length for AI:', cleanText.length)
-    console.log('Cleaned text sample (first 300 chars):', cleanText.substring(0, 300))
-    
-    if (cleanText.length < 50) {
-      console.error('Insufficient text extracted for processing:', cleanText.length, 'characters')
-      
-      // Update resume status to failed_no_text
-      await supabaseClient
-        .from('resumes')
-        .update({ parsing_status: 'failed_no_text' })
-        .eq('id', resumeId)
-        
-      throw new Error(`Could not extract sufficient text from the resume file. Only ${cleanText.length} characters extracted. Raw text: ${rawExtractedText.substring(0, 200)}`)
-    }
-    
-    // Enhanced Groq API call with strict JSON-only system prompt
-    const systemPrompt = `You are an expert resume parsing API. Your sole function is to extract information from the provided resume text and return ONLY a valid JSON object.
 
-CRITICAL RULES:
-1. Your ENTIRE response MUST be a single, valid JSON object. It must start with { and end with }.
-2. ABSOLUTELY NO other text, explanations, apologies, conversational remarks, or markdown formatting (like \`\`\`json) should be present in your response.
-3. If specific information is not found, use JSON \`null\` for string/object fields and an empty array \`[]\` for list fields. DO NOT use empty strings "" unless the value is explicitly an empty string in the resume.
-4. Extract information as accurately as possible. Do not invent details or infer beyond what's present.
-5. For lists like skills, experience, and education, ensure they are valid JSON arrays. If multiple entries are found for experience or education, include all of them as objects within the array.
-6. Pay attention to typical resume structures:
-   * The candidate's full name is often a prominent heading at the top.
-   * Contact information (email, phone, location) is usually grouped near the name or at the end.
-   * Sections like "Skills", "Experience", "Work History", "Projects", "Education" usually have these words as headings. Extract the content listed under these headings.
-   * For experience, try to capture bullet points or paragraphs describing responsibilities and achievements for each role.
+    console.log('Raw extracted text (first 500 chars):', extractedText.substring(0, 500));
 
-REQUIRED JSON STRUCTURE (Adhere strictly to this. Field names must be exact):
-{
-  "full_name": "Candidate's full name or null",
-  "email": "Primary email address or null",
-  "phone": "Primary phone number or null",
-  "location": "Candidate's location (e.g., City, ST) or null",
-  "summary": "A brief professional summary or objective if clearly present (2-4 sentences), otherwise null",
-  "skills": ["List of distinct skills. Examples: Python, JavaScript, Project Management, Agile Methodologies"],
-  "experience": [
-    {
-      "title": "Job title or null",
-      "company": "Company name or null",
-      "duration": "Employment duration (e.g., Jan 2020 - Present, 05/2018 - 12/2019) or null",
-      "description": "Detailed bullet points or paragraph describing responsibilities/achievements. This can be a single string with newlines preserved, or an array of strings. Or null."
+    if (extractedText.length < 50) {
+      throw new Error('Could not extract sufficient text from the file. It might be empty, corrupted, or an image-based PDF.');
     }
-  ],
-  "education": [
-    {
-      "degree": "Degree obtained (e.g., Bachelor of Science in Computer Science) or null",
-      "institution": "Name of the educational institution or null",
-      "year": "Graduation year or period (e.g., 2020, May 2019 - June 2021) or null"
-    }
-  ]
-}`
 
-    console.log('Calling Groq API with enhanced prompt')
+    // Clean and limit text for the AI
+    let cleanText = extractedText.replace(/\s+/g, ' ').trim();
+    if (cleanText.length > 4000) { // Keep a generous amount for the AI
+      cleanText = cleanText.substring(0, 4000);
+    }
     
+    console.log(`Sending ${cleanText.length} characters to AI.`);
+
     const groqResponse = await fetch('https://api.groq.com/openai/v1/chat/completions', {
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${Deno.env.get('GROQ_API_KEY')}`,
-        'Content-Type': 'application/json',
+        'Content-Type': 'application/json'
       },
       body: JSON.stringify({
-        model: 'llama3-70b-8192', // Using the more powerful model
+        model: 'llama3-8b-8192',
         messages: [
           {
             role: 'system',
-            content: systemPrompt
+            content: 'You are an expert resume parsing assistant. Analyze the provided resume text and extract key information. Your response MUST be a single, valid JSON object and nothing else. The JSON object should have these fields: "full_name" (string), "email" (string), "phone" (string), "location" (string), "summary" (string), "skills" (array of strings), "experience" (array of objects with "title", "company", "duration", "description" fields), "education" (array of objects with "degree", "institution", "year" fields). If a field is not found, use null or an empty array.'
           },
-          {
-            role: 'user',
-            content: `Extract information from this resume text:\n\n${cleanText}`
-          }
+          { role: 'user', content: `Extract data from this resume text: ${cleanText}` }
         ],
-        temperature: 0.0, // Deterministic output for consistent parsing
-        max_tokens: 3500, // Allow for detailed JSON with comprehensive descriptions
-        top_p: 0.1, // Focus on most likely responses
-      }),
-    })
+        // **THIS IS THE KEY FIX FOR RELIABLE JSON**
+        response_format: { type: "json_object" },
+        temperature: 0.1,
+        max_tokens: 2048,
+      })
+    });
 
     if (!groqResponse.ok) {
-      const errorText = await groqResponse.text()
-      console.error('Groq API error:', errorText)
-      throw new Error(`Groq API failed: ${groqResponse.status} - ${errorText}`)
+      const errorText = await groqResponse.text();
+      console.error('Groq API error:', errorText);
+      throw new Error(`Groq API failed with status: ${groqResponse.status}`);
     }
 
-    const groqData = await groqResponse.json()
-    console.log('Groq response received')
+    const groqData = await groqResponse.json();
+    const messageContent = groqData.choices?.[0]?.message?.content;
 
-    if (!groqData.choices || !groqData.choices[0] || !groqData.choices[0].message) {
-      throw new Error('Invalid response structure from Groq API')
+    if (!messageContent) {
+      throw new Error('Invalid or empty response from Groq AI.');
     }
 
-    let parsedContent
-    let aiParsingError = null
-    
+    console.log('AI raw response:', messageContent);
+
+    let parsedContent;
     try {
-      const content = groqData.choices[0].message.content.trim()
-      console.log('AI raw response (first 500 chars):', content.substring(0, 500))
-      
-      // Try to extract JSON from response
-      let jsonString = content
-      
-      // Remove any markdown formatting
-      jsonString = jsonString.replace(/```json\s*/, '').replace(/```\s*$/, '')
-      
-      // Find JSON object boundaries
-      const jsonStart = jsonString.indexOf('{')
-      const jsonEnd = jsonString.lastIndexOf('}')
-      
-      if (jsonStart !== -1 && jsonEnd !== -1 && jsonEnd > jsonStart) {
-        jsonString = jsonString.substring(jsonStart, jsonEnd + 1)
-      }
-      
-      parsedContent = JSON.parse(jsonString)
-      console.log('Successfully parsed AI response')
-      
+      parsedContent = JSON.parse(messageContent);
     } catch (parseError) {
-      console.error('Failed to parse AI response as JSON:', parseError)
-      console.error('Problematic AI response:', groqData.choices[0].message.content)
-      
-      aiParsingError = `JSON parsing failed: ${parseError.message}`
-      
-      // Enhanced fallback parsing using the high-quality extracted text
-      console.log('Using enhanced fallback parsing')
+      console.error('Failed to parse JSON from AI response:', parseError);
+      // Fallback if AI fails to produce valid JSON despite instructions
       parsedContent = {
-        full_name: extractNameFromText(cleanText),
+        full_name: null,
         email: extractEmailFromText(cleanText),
         phone: extractPhoneFromText(cleanText),
-        location: extractLocationFromText(cleanText),
-        summary: extractSummaryFromText(cleanText),
-        skills: extractSkillsFromText(cleanText),
-        experience: extractExperienceFromText(cleanText),
-        education: extractEducationFromText(cleanText),
-        ai_parsing_error: aiParsingError
-      }
+        location: null, summary: null, skills: [], experience: [], education: []
+      };
+      throw new Error('AI response was not valid JSON. Using fallback data.');
     }
+    
+    console.log('Successfully parsed AI response.');
 
-    // Get user ID from the resume record
     const { data: resumeData, error: resumeError } = await supabaseClient
-      .from('resumes')
-      .select('user_id')
-      .eq('id', resumeId)
-      .single()
+      .from('resumes').select('user_id').eq('id', resumeId).single();
 
-    if (resumeError) {
-      throw new Error(`Failed to get resume data: ${resumeError.message}`)
-    }
+    if (resumeError) throw new Error(`Failed to get resume user_id: ${resumeError.message}`);
 
-    // Store parsed data in the database
-    const insertData = {
+    const { error: insertError } = await supabaseClient.from('parsed_resume_details').insert({
       resume_id: resumeId,
       user_id: resumeData.user_id,
       full_name: parsedContent.full_name || null,
@@ -552,251 +202,40 @@ REQUIRED JSON STRUCTURE (Adhere strictly to this. Field names must be exact):
       skills_json: parsedContent.skills || [],
       experience_json: parsedContent.experience || [],
       education_json: parsedContent.education || [],
-      raw_text_content: cleanText,
-    }
-    
-    // Add AI parsing error if it exists
-    if (aiParsingError) {
-      insertData.ai_parsing_error = aiParsingError
-    }
+      raw_text_content: cleanText
+    });
 
-    const { error: insertError } = await supabaseClient
-      .from('parsed_resume_details')
-      .insert(insertData)
+    if (insertError) throw new Error(`Failed to store parsed data: ${insertError.message}`);
 
-    if (insertError) {
-      throw new Error(`Failed to store parsed data: ${insertError.message}`)
-    }
+    await supabaseClient.from('resumes').update({ parsing_status: 'completed' }).eq('id', resumeId);
 
-    // Update resume status to completed
-    await supabaseClient
-      .from('resumes')
-      .update({ parsing_status: 'completed' })
-      .eq('id', resumeId)
-
-    console.log('Resume parsing completed successfully')
-
-    return new Response(
-      JSON.stringify({ 
-        success: true, 
-        parsedData: parsedContent,
-        textLength: cleanText.length,
-        aiParsingUsed: !aiParsingError
-      }),
-      { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-    )
+    console.log('Resume parsing completed successfully for resumeId:', resumeId);
+    return new Response(JSON.stringify({ success: true, parsedData: parsedContent }), {
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+    });
 
   } catch (error) {
-    console.error('Error parsing resume:', error)
+    console.error(`Error processing resume ${resumeId}:`, error.message);
     
-    // Update resume status to failed
-    try {
-      const supabaseClient = createClient(
-        Deno.env.get('SUPABASE_URL') ?? '',
-        Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? ''
-      )
-      
-      if (requestBody?.resumeId) {
-        const status = error.message.includes('insufficient text') ? 'failed_no_text' : 'failed_exception'
-        await supabaseClient
-          .from('resumes')
-          .update({ parsing_status: status })
-          .eq('id', requestBody.resumeId)
+    // Update resume status to 'failed' only if we have a resumeId
+    if (resumeId) {
+      try {
+        const supabaseClientForError = createClient(
+          Deno.env.get('SUPABASE_URL') ?? '',
+          Deno.env.get('SUPABASE_ANON_KEY') ?? '',
+          // Use service role key for error updates if needed, or pass auth from request
+          { global: { headers: { Authorization: req.headers.get('Authorization')! } } }
+        );
+        await supabaseClientForError.from('resumes').update({ parsing_status: 'failed' }).eq('id', resumeId);
+        console.log(`Updated resume ${resumeId} status to 'failed'.`);
+      } catch (updateError) {
+        console.error('Fatal: Failed to update resume status to failed.', updateError);
       }
-    } catch (updateError) {
-      console.error('Failed to update resume status:', updateError)
     }
     
-    return new Response(
-      JSON.stringify({ error: error.message }),
-      { 
-        status: 500,
-        headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-      }
-    )
+    return new Response(JSON.stringify({ error: error.message }), {
+      status: 500,
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+    });
   }
-})
-
-// Enhanced helper functions for fallback parsing
-function extractNameFromText(text: string): string | null {
-  const lines = text.split(/\n|\r\n/).map(line => line.trim()).filter(line => line.length > 0)
-  
-  // Look for name patterns in first few lines
-  for (let i = 0; i < Math.min(8, lines.length); i++) {
-    const line = lines[i]
-    
-    // Skip obvious non-name lines
-    if (line.toLowerCase().includes('resume') || 
-        line.toLowerCase().includes('cv') ||
-        line.toLowerCase().includes('curriculum') ||
-        line.includes('@') ||
-        /^\d/.test(line) ||
-        line.length < 3 ||
-        line.length > 60) {
-      continue
-    }
-    
-    // Look for name-like patterns
-    if (/^[A-Z][a-z]+ [A-Z][a-z]+/.test(line) || 
-        /^[A-Z][a-z]+ [A-Z]\. [A-Z][a-z]+/.test(line) ||
-        /^[A-Z][A-Z\s]+$/.test(line)) {
-      return line.trim()
-    }
-  }
-  
-  return null
-}
-
-function extractEmailFromText(text: string): string | null {
-  const emailPattern = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g
-  const matches = text.match(emailPattern)
-  return matches ? matches[0] : null
-}
-
-function extractPhoneFromText(text: string): string | null {
-  const phonePatterns = [
-    /(\+?1?[-.\s]?)?\(?([0-9]{3})\)?[-.\s]?([0-9]{3})[-.\s]?([0-9]{4})/,
-    /(\+?[1-9]\d{0,3}[-.\s]?)?(\d{1,4}[-.\s]?){1,4}\d{1,9}/
-  ]
-  
-  for (const pattern of phonePatterns) {
-    const match = text.match(pattern)
-    if (match) {
-      return match[0].trim()
-    }
-  }
-  return null
-}
-
-function extractLocationFromText(text: string): string | null {
-  const locationPatterns = [
-    /([A-Z][a-z]+,\s*[A-Z]{2,})/,
-    /([A-Z][a-z\s]+,\s*[A-Z][a-z\s]+)/,
-    /([A-Z][a-z]+\s*,\s*[A-Z][a-z]+\s*,\s*[A-Z]{2,})/
-  ]
-  
-  for (const pattern of locationPatterns) {
-    const match = text.match(pattern)
-    if (match) {
-      return match[1].trim()
-    }
-  }
-  return null
-}
-
-function extractSummaryFromText(text: string): string | null {
-  const summaryKeywords = ['summary', 'objective', 'profile', 'about', 'overview']
-  const sections = text.toLowerCase().split(/\n\s*\n/)
-  
-  for (const section of sections) {
-    for (const keyword of summaryKeywords) {
-      if (section.includes(keyword) && section.length > 50 && section.length < 500) {
-        return section.replace(new RegExp(keyword, 'gi'), '').trim()
-      }
-    }
-  }
-  return null
-}
-
-function extractSkillsFromText(text: string): string[] {
-  const skillsKeywords = ['skills', 'technical skills', 'competencies', 'technologies', 'tools']
-  const commonSkills = [
-    'javascript', 'python', 'java', 'react', 'angular', 'vue', 'node', 'html', 'css',
-    'sql', 'mongodb', 'postgresql', 'mysql', 'aws', 'azure', 'docker', 'kubernetes', 'git',
-    'typescript', 'php', 'ruby', 'go', 'rust', 'swift', 'kotlin', 'flutter', 'django',
-    'spring', 'express', 'laravel', 'rails', 'tensorflow', 'pytorch', 'machine learning',
-    'artificial intelligence', 'data science', 'blockchain', 'microservices', 'devops',
-    'agile', 'scrum', 'project management', 'leadership', 'communication'
-  ]
-  
-  const foundSkills: string[] = []
-  const lowerText = text.toLowerCase()
-  
-  // Look for skills in dedicated sections
-  const sections = text.split(/\n\s*\n/)
-  for (const section of sections) {
-    const lowerSection = section.toLowerCase()
-    if (skillsKeywords.some(keyword => lowerSection.includes(keyword))) {
-      // Extract skills from this section
-      for (const skill of commonSkills) {
-        if (lowerSection.includes(skill) && !foundSkills.includes(skill)) {
-          foundSkills.push(skill.charAt(0).toUpperCase() + skill.slice(1))
-        }
-      }
-    }
-  }
-  
-  // If no dedicated section found, search entire text
-  if (foundSkills.length === 0) {
-    for (const skill of commonSkills) {
-      if (lowerText.includes(skill)) {
-        foundSkills.push(skill.charAt(0).toUpperCase() + skill.slice(1))
-      }
-    }
-  }
-  
-  return foundSkills.slice(0, 15) // Limit to 15 skills
-}
-
-function extractExperienceFromText(text: string): Array<{title: string, company: string, duration: string, description: string}> {
-  const experience = []
-  const experienceKeywords = ['experience', 'employment', 'work history', 'professional experience']
-  const sections = text.split(/\n\s*\n/)
-  
-  for (const section of sections) {
-    const lowerSection = section.toLowerCase()
-    if (experienceKeywords.some(keyword => lowerSection.includes(keyword)) && section.length > 100) {
-      // Try to parse experience entries
-      const lines = section.split('\n').filter(line => line.trim().length > 10)
-      
-      for (let i = 0; i < lines.length && experience.length < 5; i++) {
-        const line = lines[i].trim()
-        if (line.toLowerCase().includes('developer') || 
-            line.toLowerCase().includes('engineer') || 
-            line.toLowerCase().includes('manager') || 
-            line.toLowerCase().includes('analyst') ||
-            line.toLowerCase().includes('specialist')) {
-          
-          const nextLines = lines.slice(i + 1, i + 4).join(' ')
-          experience.push({
-            title: line.length > 100 ? line.substring(0, 100) : line,
-            company: 'Not specified',
-            duration: 'Not specified',
-            description: nextLines.length > 200 ? nextLines.substring(0, 200) : nextLines
-          })
-        }
-      }
-    }
-  }
-  
-  return experience
-}
-
-function extractEducationFromText(text: string): Array<{degree: string, institution: string, year: string}> {
-  const education = []
-  const educationKeywords = ['education', 'academic background', 'qualifications', 'degree']
-  const degreeKeywords = ['bachelor', 'master', 'phd', 'doctorate', 'diploma', 'certificate', 'degree']
-  
-  const sections = text.split(/\n\s*\n/)
-  
-  for (const section of sections) {
-    const lowerSection = section.toLowerCase()
-    if (educationKeywords.some(keyword => lowerSection.includes(keyword))) {
-      const lines = section.split('\n').filter(line => line.trim().length > 5)
-      
-      for (const line of lines) {
-        const lowerLine = line.toLowerCase()
-        if (degreeKeywords.some(keyword => lowerLine.includes(keyword))) {
-          education.push({
-            degree: line.trim().length > 100 ? line.trim().substring(0, 100) : line.trim(),
-            institution: 'Not specified',
-            year: 'Not specified'
-          })
-          break // Only one education entry for simplicity
-        }
-      }
-    }
-  }
-  
-  return education
-}
+});
