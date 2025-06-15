@@ -8,87 +8,139 @@ const corsHeaders = {
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
 }
 
-// Enhanced PDF text extraction with safety mechanisms
+// Enhanced PDF text extraction with better error handling
 async function extractTextFromPDF(arrayBuffer: ArrayBuffer): Promise<string> {
   try {
     console.log('Starting PDF extraction with pdf.js')
     
-    // Limit PDF size to prevent memory issues (10MB)
-    if (arrayBuffer.byteLength > 10 * 1024 * 1024) {
-      console.warn('PDF file too large, falling back to basic extraction')
-      throw new Error('PDF file too large for pdf.js processing')
+    // Limit PDF size to prevent memory issues (5MB for safer processing)
+    if (arrayBuffer.byteLength > 5 * 1024 * 1024) {
+      console.warn('PDF file too large, using fallback extraction')
+      return await fallbackPDFExtraction(arrayBuffer)
     }
     
-    // Configure pdf.js worker with error handling
-    pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://esm.sh/pdfjs-dist@3.11.174/build/pdf.worker.min.js'
-    
-    const typedArray = new Uint8Array(arrayBuffer)
-    
-    // Add timeout to prevent hanging
-    const pdfPromise = pdfjsLib.getDocument({
-      data: typedArray,
-      verbosity: 0, // Reduce logging
-      maxImageSize: 1024 * 1024, // Limit image size
-    }).promise
-    
-    const timeoutPromise = new Promise((_, reject) => 
-      setTimeout(() => reject(new Error('PDF parsing timeout')), 30000)
-    )
-    
-    const pdf = await Promise.race([pdfPromise, timeoutPromise]) as any
-    
-    console.log(`PDF loaded successfully, ${pdf.numPages} pages found`)
-    
-    // Limit number of pages to process
-    const maxPages = Math.min(pdf.numPages, 20)
-    let fullText = ''
-    
-    // Extract text from each page with individual timeouts
-    for (let pageNum = 1; pageNum <= maxPages; pageNum++) {
-      try {
-        const pagePromise = pdf.getPage(pageNum)
-        const pageTimeoutPromise = new Promise((_, reject) => 
-          setTimeout(() => reject(new Error(`Page ${pageNum} timeout`)), 10000)
-        )
-        
-        const page = await Promise.race([pagePromise, pageTimeoutPromise]) as any
-        
-        const textContentPromise = page.getTextContent()
-        const textTimeoutPromise = new Promise((_, reject) => 
-          setTimeout(() => reject(new Error(`Text extraction timeout for page ${pageNum}`)), 5000)
-        )
-        
-        const textContent = await Promise.race([textContentPromise, textTimeoutPromise]) as any
-        
-        // Safely extract text items
-        if (textContent && textContent.items && Array.isArray(textContent.items)) {
-          const pageText = textContent.items
-            .filter((item: any) => item && typeof item.str === 'string')
-            .map((item: any) => item.str)
-            .join(' ')
+    // Use a simpler, more reliable PDF extraction approach
+    try {
+      const uint8Array = new Uint8Array(arrayBuffer)
+      
+      // Try to extract text using a basic string search approach first
+      let extractedText = await basicPDFTextExtraction(uint8Array)
+      
+      if (extractedText && extractedText.length > 100) {
+        console.log(`Basic PDF extraction successful: ${extractedText.length} characters`)
+        return extractedText
+      }
+      
+      // If basic extraction fails, try pdf.js
+      pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://esm.sh/pdfjs-dist@3.11.174/build/pdf.worker.min.js'
+      
+      const loadingTask = pdfjsLib.getDocument({
+        data: uint8Array,
+        verbosity: 0,
+        maxImageSize: 512 * 1024, // Smaller limit
+        disableFontFace: true, // Disable font loading for stability
+        disableRange: true, // Disable range requests
+        disableStream: true, // Disable streaming
+      })
+      
+      const pdf = await Promise.race([
+        loadingTask.promise,
+        new Promise((_, reject) => setTimeout(() => reject(new Error('PDF loading timeout')), 15000))
+      ]) as any
+      
+      console.log(`PDF loaded successfully, ${pdf.numPages} pages found`)
+      
+      let fullText = ''
+      const maxPages = Math.min(pdf.numPages, 5) // Process fewer pages for reliability
+      
+      for (let pageNum = 1; pageNum <= maxPages; pageNum++) {
+        try {
+          const page = await Promise.race([
+            pdf.getPage(pageNum),
+            new Promise((_, reject) => setTimeout(() => reject(new Error(`Page ${pageNum} timeout`)), 5000))
+          ]) as any
           
-          fullText += pageText + '\n'
-          console.log(`Page ${pageNum} extracted: ${pageText.length} characters`)
+          const textContent = await Promise.race([
+            page.getTextContent({ normalizeWhitespace: true }),
+            new Promise((_, reject) => setTimeout(() => reject(new Error(`Text content timeout for page ${pageNum}`)), 3000))
+          ]) as any
+          
+          if (textContent?.items?.length) {
+            const pageText = textContent.items
+              .filter((item: any) => item?.str && typeof item.str === 'string' && item.str.trim())
+              .map((item: any) => item.str.trim())
+              .join(' ')
+            
+            if (pageText.length > 10) {
+              fullText += pageText + '\n'
+              console.log(`Page ${pageNum} extracted: ${pageText.length} characters`)
+            }
+          }
+        } catch (pageError) {
+          console.error(`Error on page ${pageNum}:`, pageError)
+          continue
         }
-      } catch (pageError) {
-        console.error(`Error extracting page ${pageNum}:`, pageError)
-        continue
+      }
+      
+      if (fullText.length > 50) {
+        console.log(`PDF.js extraction successful: ${fullText.length} characters`)
+        return fullText.trim()
+      }
+      
+    } catch (pdfjsError) {
+      console.error('PDF.js failed:', pdfjsError)
+    }
+    
+    // Fallback to basic extraction
+    return await fallbackPDFExtraction(arrayBuffer)
+    
+  } catch (error) {
+    console.error('All PDF extraction methods failed:', error)
+    return await fallbackPDFExtraction(arrayBuffer)
+  }
+}
+
+// Basic PDF text extraction using string patterns
+async function basicPDFTextExtraction(uint8Array: Uint8Array): Promise<string> {
+  try {
+    console.log('Trying basic PDF text extraction')
+    
+    // Convert to string for pattern matching
+    const pdfString = String.fromCharCode.apply(null, Array.from(uint8Array.slice(0, Math.min(uint8Array.length, 2 * 1024 * 1024))))
+    
+    // Look for text between common PDF text markers
+    const textPatterns = [
+      /BT\s+(.*?)\s+ET/gs, // Text between BT and ET markers
+      /\[(.*?)\]/g, // Text in brackets
+      /\((.*?)\)/g, // Text in parentheses
+    ]
+    
+    let extractedText = ''
+    const foundTexts = new Set<string>()
+    
+    for (const pattern of textPatterns) {
+      const matches = pdfString.match(pattern) || []
+      for (const match of matches.slice(0, 100)) { // Limit matches
+        let cleanText = match
+          .replace(/BT|ET|\[|\]|\(|\)/g, '')
+          .replace(/\\[rnt]/g, ' ')
+          .replace(/[^\x20-\x7E\s]/g, ' ')
+          .replace(/\s+/g, ' ')
+          .trim()
+        
+        if (cleanText.length > 3 && cleanText.length < 200 && /[a-zA-Z]/.test(cleanText)) {
+          foundTexts.add(cleanText)
+        }
       }
     }
     
-    console.log(`Total PDF text extracted: ${fullText.length} characters`)
-    return fullText.trim()
+    extractedText = Array.from(foundTexts).join(' ')
+    console.log(`Basic extraction found: ${extractedText.length} characters`)
     
+    return extractedText
   } catch (error) {
-    console.error('PDF.js extraction failed, attempting fallback:', error)
-    
-    // Enhanced fallback extraction
-    try {
-      return await fallbackPDFExtraction(arrayBuffer)
-    } catch (fallbackError) {
-      console.error('Fallback PDF extraction also failed:', fallbackError)
-      return ''
-    }
+    console.error('Basic PDF extraction failed:', error)
+    return ''
   }
 }
 
@@ -310,27 +362,39 @@ serve(async (req) => {
     console.log('Raw extracted text (first 500 chars):', rawExtractedText.substring(0, 500))
     console.log('Total raw extracted text length:', rawExtractedText.length)
     
-    // Clean and prepare text for AI processing - keep much more content
+    // Clean and prepare text for AI processing
     let cleanText = rawExtractedText
       .replace(/\s+/g, ' ') // Normalize whitespace
-      .replace(/[^\w\s@.,-]/g, ' ') // Keep letters, numbers, basic punctuation
+      .replace(/[^\w\s@.,()-]/g, ' ') // Keep more punctuation for better parsing
       .trim()
     
-    // Limit to substantial amount for LLM (15,000-20,000 characters)
-    const maxTextLength = 18000
+    console.log('Raw text sample (first 200 chars):', rawExtractedText.substring(0, 200))
+    console.log('Initial cleaned text length:', cleanText.length)
+    
+    // If text is too short, try to extract more aggressively
+    if (cleanText.length < 200 && rawExtractedText.length > 50) {
+      console.log('Text too short, trying aggressive extraction')
+      cleanText = rawExtractedText
+        .replace(/[^\x20-\x7E\s]/g, ' ') // Keep only printable ASCII
+        .replace(/\s+/g, ' ')
+        .trim()
+    }
+    
+    // Limit text for LLM processing
+    const maxTextLength = 15000
     if (cleanText.length > maxTextLength) {
       cleanText = cleanText.substring(0, maxTextLength)
-      // Try to end at a word boundary
       const lastSpace = cleanText.lastIndexOf(' ')
-      if (lastSpace > maxTextLength * 0.9) {
+      if (lastSpace > maxTextLength * 0.8) {
         cleanText = cleanText.substring(0, lastSpace)
       }
     }
     
-    console.log('Cleaned text length for AI:', cleanText.length)
+    console.log('Final cleaned text length for AI:', cleanText.length)
+    console.log('Cleaned text sample (first 300 chars):', cleanText.substring(0, 300))
     
-    if (cleanText.length < 100) {
-      console.error('Insufficient text extracted for processing')
+    if (cleanText.length < 50) {
+      console.error('Insufficient text extracted for processing:', cleanText.length, 'characters')
       
       // Update resume status to failed_no_text
       await supabaseClient
@@ -338,7 +402,7 @@ serve(async (req) => {
         .update({ parsing_status: 'failed_no_text' })
         .eq('id', resumeId)
         
-      throw new Error('Could not extract sufficient text from the resume file (less than 100 characters)')
+      throw new Error(`Could not extract sufficient text from the resume file. Only ${cleanText.length} characters extracted. Raw text: ${rawExtractedText.substring(0, 200)}`)
     }
     
     // Enhanced Groq API call with strict JSON-only system prompt
