@@ -1,3 +1,4 @@
+
 import React, { useState, useCallback, useEffect } from 'react';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -110,11 +111,12 @@ export const ResumeUpload = () => {
     
     try {
       for (const file of Array.from(files)) {
-        // Check file type
-        if (!file.type.includes('pdf') && !file.type.includes('doc')) {
+        // Check file type - now accepting more file types that Gemini can handle
+        const allowedTypes = ['application/pdf', 'text/plain', 'image/jpeg', 'image/png', 'image/gif', 'image/webp'];
+        if (!allowedTypes.includes(file.type)) {
           toast({
             title: "Invalid file type",
-            description: "Please upload PDF or DOC files only",
+            description: "Please upload PDF, TXT, or image files (JPG, PNG, GIF, WebP)",
             variant: "destructive",
           });
           continue;
@@ -260,7 +262,7 @@ export const ResumeUpload = () => {
         <CardHeader>
           <CardTitle>Resume Upload</CardTitle>
           <CardDescription>
-            Upload PDF or DOC files. Our AI will automatically parse and extract candidate information.
+            Upload PDF, TXT, or image files. Our AI will automatically parse and extract candidate information.
           </CardDescription>
         </CardHeader>
         <CardContent>
@@ -283,7 +285,7 @@ export const ResumeUpload = () => {
             <input
               type="file"
               multiple
-              accept=".pdf,.doc,.docx"
+              accept=".pdf,.txt,.jpg,.jpeg,.png,.gif,.webp"
               onChange={(e) => e.target.files && handleFileUpload(e.target.files)}
               className="hidden"
               id="file-upload"
@@ -357,7 +359,7 @@ export const ResumeUpload = () => {
           <div className="mt-6 flex items-start space-x-2 text-sm text-gray-600">
             <AlertCircle className="h-4 w-4 mt-0.5 text-amber-500" />
             <div>
-              <p>Supported formats: PDF, DOC, DOCX</p>
+              <p>Supported formats: PDF, TXT, JPG, PNG, GIF, WebP</p>
               <p>Maximum file size: 10MB per file</p>
               <p>AI parsing will begin automatically after upload</p>
             </div>

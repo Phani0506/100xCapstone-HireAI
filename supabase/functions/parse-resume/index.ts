@@ -1,241 +1,318 @@
+
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.7.1';
 
-const corsHeaders = {
-  'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type'
-};
+// Helper Function to Call Google AI (Gemini) for structured JSON parsing
+async function getGeminiJSONCompletion(prompt: string) {
+  const apiKey = Deno.env.get('GOOGLE_AI_API_KEY');
+  if (!apiKey) throw new Error('Google AI API key not found');
 
-// A best-effort PDF text extraction function.
-// WARNING: This is highly unreliable for complex or compressed PDFs.
-// It attempts to find plain text streams, but may miss a lot of content.
-// For production, a dedicated PDF parsing library or service is recommended.
-async function extractTextFromPDF(arrayBuffer) {
+  const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      contents: [{ parts: [{ text: prompt }] }],
+      generationConfig: {
+        temperature: 0.1,
+        maxOutputTokens: 8192,
+        responseMimeType: "application/json"
+      }
+    })
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    console.error('Gemini JSON parsing error:', errorText);
+    throw new Error(`Gemini JSON API failed: ${response.status} - ${errorText}`);
+  }
+
+  const data = await response.json();
+  if (!data.candidates || !data.candidates[0] || !data.candidates[0].content) {
+    console.error('Unexpected Gemini JSON response structure:', JSON.stringify(data));
+    throw new Error('Invalid response from Gemini JSON API');
+  }
+
+  return data.candidates[0].content.parts[0].text;
+}
+
+// New AI-based text extraction for any file type Gemini supports (PDF, images, etc.)
+async function extractTextWithAI(fileBlob: Blob) {
+  console.log(`Extracting text from ${fileBlob.type} with Gemini...`);
+  const apiKey = Deno.env.get('GOOGLE_AI_API_KEY');
+  if (!apiKey) throw new Error('Google AI API key not found for text extraction');
+
+  const arrayBuffer = await fileBlob.arrayBuffer();
+  const uint8Array = new Uint8Array(arrayBuffer);
+  let binary = '';
+  for (let i = 0; i < uint8Array.byteLength; i++) {
+    binary += String.fromCharCode(uint8Array[i]);
+  }
+  const base64Data = btoa(binary);
+
+  const prompt = `Extract all text from the provided file. Be as accurate as possible, preserving paragraphs and lists. Return ONLY the raw extracted text.`;
+
+  const requestBody = {
+    contents: [{
+      parts: [
+        { text: prompt },
+        { inline_data: { mime_type: fileBlob.type, data: base64Data } },
+      ],
+    }],
+    generationConfig: {
+      temperature: 0.0,
+      maxOutputTokens: 8192,
+      responseMimeType: "text/plain"
+    }
+  };
+
+  const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(requestBody)
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    console.error('Gemini text extraction error:', errorText);
+    throw new Error(`Gemini text extraction failed: ${response.status} - ${errorText}`);
+  }
+
+  const data = await response.json();
+  if (!data.candidates || !data.candidates[0] || !data.candidates[0].content || !data.candidates[0].content.parts[0].text) {
+    if (data.promptFeedback?.blockReason) {
+      const reason = `Text extraction blocked by safety settings: ${data.promptFeedback.blockReason}`;
+      console.error(reason);
+      throw new Error(reason);
+    }
+    console.error('Unexpected Gemini text extraction response:', JSON.stringify(data));
+    throw new Error('Invalid response from Gemini text extraction API');
+  }
+
+  const extractedText = data.candidates[0].content.parts[0].text;
+  console.log(`AI successfully extracted ${extractedText.length} characters.`);
+  return extractedText;
+}
+
+// Clean text for database storage
+function cleanTextForDatabase(text: string) {
+  if (!text) return '';
+  return text
+    .replace(/[\x00-\x1F\x7F-\x9F]/g, ' ') // Remove non-printable characters
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+// AI resume parsing with a more robust prompt
+async function parseResumeWithAI(text: string) {
+  const MAX_TEXT_LENGTH = 200000; // Generous limit for Gemini
+  if (!text || text.length < 20) {
+    throw new Error('Insufficient text for AI parsing');
+  }
+  
+  const truncatedText = text.substring(0, MAX_TEXT_LENGTH);
+  console.log(`Parsing text of length: ${truncatedText.length}`);
+
+  const aiPrompt = `
+Extract information from this resume text and return ONLY a valid JSON object with this exact structure:
+{
+  "full_name": "string",
+  "email": "string", 
+  "phone": "string",
+  "location": "string",
+  "skills": ["string"],
+  "experience": [{"title": "string", "company": "string", "duration": "string", "description": "string"}],
+  "education": [{"degree": "string", "institution": "string", "year": "string"}]
+}
+
+Extraction Rules:
+- Extract information accurately from the text.
+- If a value isn't found, use null for strings and empty arrays [] for lists.
+- DO NOT invent or fabricate any information.
+- The resume text might be messy or from an OCR process; do your best to interpret it.
+- For "experience" and "education", extract every entry you can find.
+- For "description" in experience, capture the key responsibilities and achievements.
+
+Resume text to parse:
+---
+${truncatedText}
+---
+`;
+
   try {
-    const uint8Array = new Uint8Array(arrayBuffer);
-    let text = '';
+    console.log('Sending parsing request to Gemini AI...');
+    const aiResult = await getGeminiJSONCompletion(aiPrompt);
+    console.log('Raw Gemini response received.');
     
-    // Convert bytes to a string-like representation to find text patterns
-    // This is a simplified approach and might not work for all encodings
-    let pdfAsString = '';
-    for (let i = 0; i < uint8Array.length; i++) {
-        pdfAsString += String.fromCharCode(uint8Array[i]);
+    let cleanedResult = aiResult.trim();
+    if (cleanedResult.startsWith('```json')) {
+      cleanedResult = cleanedResult.replace(/^```json\s*/, '').replace(/\s*```$/, '');
+    } else if (cleanedResult.startsWith('```')) {
+      cleanedResult = cleanedResult.replace(/^```\s*/, '').replace(/\s*```$/, '');
     }
-
-    // Attempt to extract text from stream objects, which is where content often lives
-    const streamMatches = pdfAsString.match(/stream([\s\S]*?)endstream/g) || [];
     
-    for (const stream of streamMatches) {
-      // Basic cleaning of stream content
-      const content = stream
-        .replace(/^stream\r?\n/, '')
-        .replace(/\r?\nendstream$/, '');
-
-      // Look for text within parentheses, a common pattern in PDF content (TJ operator)
-      const textMatches = content.match(/\((.*?)\)/g) || [];
-      textMatches.forEach((match) => {
-        const cleaned = match
-          .slice(1, -1) // Remove parentheses
-          .replace(/\\(r|n|t)/g, ' ') // Replace escape sequences
-          .replace(/\\/g, '') // Remove other backslashes
-          .trim();
-        
-        // Add if it looks like meaningful text
-        if (cleaned.length > 2 && /[a-zA-Z]/.test(cleaned)) {
-          text += cleaned + ' ';
-        }
-      });
-    }
-
-    // Final cleanup
-    text = text.replace(/\s+/g, ' ').trim();
-    console.log(`Extracted ${text.length} characters from PDF.`);
-    return text;
+    const parsed = JSON.parse(cleanedResult);
+    console.log('Successfully parsed AI result.');
+    
+    return {
+      full_name: parsed.full_name || null,
+      email: parsed.email || null,
+      phone: parsed.phone || null,
+      location: parsed.location || null,
+      skills_json: Array.isArray(parsed.skills) ? parsed.skills : [],
+      experience_json: Array.isArray(parsed.experience) ? parsed.experience : [],
+      education_json: Array.isArray(parsed.education) ? parsed.education : [],
+    };
+    
   } catch (error) {
-    console.error('PDF extraction error:', error);
-    return '';
+    console.error('AI parsing failed:', error.message);
+    throw error;
   }
 }
 
-// Helper functions for fallback parsing (if AI fails)
-function extractEmailFromText(text) {
-  const match = text.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/);
-  return match ? match[0] : null;
-}
-function extractPhoneFromText(text) {
-    // A more robust regex for various phone formats
-    const match = text.match(/(?:\+?\d{1,3}[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}/);
-    return match ? match[0] : null;
-}
-// Add other simple regex-based fallbacks if needed...
+// Enhanced regex-based extraction as fallback
+function extractBasicInfoWithRegex(text: string) {
+  console.log('Using regex fallback extraction...');
+  const emailMatch = text.match(/\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b/);
+  const phoneMatch = text.match(/(?:\+?\d{1,3}[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}/);
+  
+  const lines = text.split(/[\n\r]+/).filter(line => line.trim().length > 2);
+  let name = null;
+  if (lines.length > 0) {
+    const firstLine = lines[0].trim();
+    if (firstLine.length > 3 && firstLine.length < 50 && /^[A-Z][a-zA-Z\s.'-]+$/.test(firstLine)) {
+        name = firstLine;
+    }
+  }
 
+  return {
+    full_name: name,
+    email: emailMatch ? emailMatch[0] : null,
+    phone: phoneMatch ? phoneMatch[0] : null,
+    location: null,
+    skills_json: [],
+    experience_json: [],
+    education_json: [],
+  };
+}
+
+// Main Server Logic
 serve(async (req) => {
   if (req.method === 'OPTIONS') {
-    return new Response(null, { headers: corsHeaders });
+    return new Response(null, { 
+      headers: { 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type' } 
+    });
   }
 
-  // Define these outside the try block so they are accessible in the catch block
   let resumeId;
-
   try {
-    const requestBody = await req.json();
-    resumeId = requestBody.resumeId; // Assign here
-    const { filePath } = requestBody;
-
-    if (!resumeId || !filePath) {
-      throw new Error('Missing resumeId or filePath in the request body.');
-    }
+    const body = await req.json();
+    resumeId = body.resumeId;
+    const filePath = body.filePath;
     
-    console.log('Processing resume:', { resumeId, filePath });
-
-    const supabaseClient = createClient(
-      Deno.env.get('SUPABASE_URL') ?? '',
-      Deno.env.get('SUPABASE_ANON_KEY') ?? '',
-      { global: { headers: { Authorization: req.headers.get('Authorization')! } } }
+    if (!resumeId || !filePath) throw new Error(`Missing resumeId or filePath`);
+    
+    console.log(`Starting parsing for resume ${resumeId} with file path: ${filePath}`);
+    
+    const serviceClient = createClient(
+      Deno.env.get('SUPABASE_URL') ?? '', 
+      Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? ''
     );
 
-    const { data: fileData, error: downloadError } = await supabaseClient
-      .storage
+    const { data: fileData, error: downloadError } = await serviceClient.storage
       .from('resumes')
       .download(filePath);
+    if (downloadError) throw new Error(`Failed to download file: ${downloadError.message}`);
 
-    if (downloadError) {
-      throw new Error(`Failed to download file: ${downloadError.message}`);
-    }
+    console.log(`File downloaded successfully: ${filePath}, type: ${fileData.type}, size: ${fileData.size}`);
 
-    let extractedText = '';
-    const lowerFilePath = filePath.toLowerCase();
-
-    if (lowerFilePath.endsWith('.pdf')) {
-      console.log('Processing PDF file...');
-      const arrayBuffer = await fileData.arrayBuffer();
-      extractedText = await extractTextFromPDF(arrayBuffer);
-    } else if (lowerFilePath.endsWith('.txt')) {
-      console.log('Processing TXT file...');
-      extractedText = await fileData.text();
-    } else {
-      // Reject unsupported files like .doc, .docx, .pages, etc.
-      throw new Error(`Unsupported file type: ${filePath}. Please upload a PDF or TXT file.`);
-    }
-
-    console.log('Raw extracted text (first 500 chars):', extractedText.substring(0, 500));
-
-    if (extractedText.length < 50) {
-      throw new Error('Could not extract sufficient text from the file. It might be empty, corrupted, or an image-based PDF.');
-    }
-
-    // Clean and limit text for the AI
-    let cleanText = extractedText.replace(/\s+/g, ' ').trim();
-    if (cleanText.length > 4000) { // Keep a generous amount for the AI
-      cleanText = cleanText.substring(0, 4000);
+    // Step 1: Extract text using AI for robustness
+    let rawText = '';
+    try {
+        rawText = await extractTextWithAI(fileData);
+    } catch(extractionError) {
+        console.error(`AI text extraction failed: ${extractionError.message}. The file might be corrupted or unsupported.`);
+        // Continue with empty text, so it gets marked as failed with context.
     }
     
-    console.log(`Sending ${cleanText.length} characters to AI.`);
+    let cleanText = cleanTextForDatabase(rawText);
+    console.log(`Text extracted and cleaned, final length: ${cleanText.length} characters`);
 
-    const groqResponse = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${Deno.env.get('GROQ_API_KEY')}`,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        model: 'llama3-8b-8192',
-        messages: [
-          {
-            role: 'system',
-            content: 'You are an expert resume parsing assistant. Analyze the provided resume text and extract key information. Your response MUST be a single, valid JSON object and nothing else. The JSON object should have these fields: "full_name" (string), "email" (string), "phone" (string), "location" (string), "summary" (string), "skills" (array of strings), "experience" (array of objects with "title", "company", "duration", "description" fields), "education" (array of objects with "degree", "institution", "year" fields). If a field is not found, use null or an empty array.'
-          },
-          { role: 'user', content: `Extract data from this resume text: ${cleanText}` }
-        ],
-        // **THIS IS THE KEY FIX FOR RELIABLE JSON**
-        response_format: { type: "json_object" },
-        temperature: 0.1,
-        max_tokens: 2048,
-      })
-    });
-
-    if (!groqResponse.ok) {
-      const errorText = await groqResponse.text();
-      console.error('Groq API error:', errorText);
-      throw new Error(`Groq API failed with status: ${groqResponse.status}`);
-    }
-
-    const groqData = await groqResponse.json();
-    const messageContent = groqData.choices?.[0]?.message?.content;
-
-    if (!messageContent) {
-      throw new Error('Invalid or empty response from Groq AI.');
-    }
-
-    console.log('AI raw response:', messageContent);
+    const { data: resumeData, error: resumeError } = await serviceClient
+      .from('resumes')
+      .select('user_id')
+      .eq('id', resumeId)
+      .single();
+    if (resumeError || !resumeData) throw new Error(`Resume with ID ${resumeId} not found: ${resumeError?.message}`);
 
     let parsedContent;
-    try {
-      parsedContent = JSON.parse(messageContent);
-    } catch (parseError) {
-      console.error('Failed to parse JSON from AI response:', parseError);
-      // Fallback if AI fails to produce valid JSON despite instructions
-      parsedContent = {
-        full_name: null,
-        email: extractEmailFromText(cleanText),
-        phone: extractPhoneFromText(cleanText),
-        location: null, summary: null, skills: [], experience: [], education: []
-      };
-      throw new Error('AI response was not valid JSON. Using fallback data.');
+
+    // Step 2: Parse the extracted text with AI
+    if (cleanText.length > 30) {
+      console.log(`Attempting AI parsing for resume ${resumeId}...`);
+      try {
+        parsedContent = await parseResumeWithAI(cleanText);
+        console.log(`AI parsing successful for resume ${resumeId}`);
+      } catch (aiError) {
+        console.error(`AI parsing failed: ${aiError.message}. Falling back to regex.`);
+        parsedContent = extractBasicInfoWithRegex(cleanText);
+      }
+    } else {
+      console.log(`Text too short for AI parsing, using regex extraction.`);
+      parsedContent = extractBasicInfoWithRegex(cleanText);
     }
+
+    const finalData = {
+        resume_id: resumeId,
+        user_id: resumeData.user_id,
+        raw_text_content: cleanText,
+        ...parsedContent
+    };
+
+    console.log('Final parsed content summary:', JSON.stringify({
+      name: finalData.full_name,
+      email: finalData.email,
+      phone: finalData.phone,
+      skills: finalData.skills_json.length,
+      experience: finalData.experience_json.length
+    }, null, 2));
+
+    const { error: insertError } = await serviceClient
+      .from('parsed_resume_details')
+      .insert(finalData);
+    if (insertError) throw new Error(`Failed to insert parsed details: ${insertError.message}`);
+
+    await serviceClient
+      .from('resumes')
+      .update({ parsing_status: 'completed' })
+      .eq('id', resumeId);
+
+    console.log(`Successfully parsed and stored details for resume ${resumeId}`);
     
-    console.log('Successfully parsed AI response.');
-
-    const { data: resumeData, error: resumeError } = await supabaseClient
-      .from('resumes').select('user_id').eq('id', resumeId).single();
-
-    if (resumeError) throw new Error(`Failed to get resume user_id: ${resumeError.message}`);
-
-    const { error: insertError } = await supabaseClient.from('parsed_resume_details').insert({
-      resume_id: resumeId,
-      user_id: resumeData.user_id,
-      full_name: parsedContent.full_name || null,
-      email: parsedContent.email || null,
-      phone: parsedContent.phone || null,
-      location: parsedContent.location || null,
-      summary: parsedContent.summary || null,
-      skills_json: parsedContent.skills || [],
-      experience_json: parsedContent.experience || [],
-      education_json: parsedContent.education || [],
-      raw_text_content: cleanText
-    });
-
-    if (insertError) throw new Error(`Failed to store parsed data: ${insertError.message}`);
-
-    await supabaseClient.from('resumes').update({ parsing_status: 'completed' }).eq('id', resumeId);
-
-    console.log('Resume parsing completed successfully for resumeId:', resumeId);
-    return new Response(JSON.stringify({ success: true, parsedData: parsedContent }), {
-      headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+    return new Response(JSON.stringify({ success: true, parsed: { name: finalData.full_name, email: finalData.email } }), { 
+      headers: { 'Access-Control-Allow-Origin': '*', 'Content-Type': 'application/json' } 
     });
 
   } catch (error) {
-    console.error(`Error processing resume ${resumeId}:`, error.message);
+    console.error(`Error processing resume ${resumeId || 'unknown'}:`, error.message);
     
-    // Update resume status to 'failed' only if we have a resumeId
     if (resumeId) {
       try {
-        const supabaseClientForError = createClient(
-          Deno.env.get('SUPABASE_URL') ?? '',
-          Deno.env.get('SUPABASE_ANON_KEY') ?? '',
-          // Use service role key for error updates if needed, or pass auth from request
-          { global: { headers: { Authorization: req.headers.get('Authorization')! } } }
+        const serviceClient = createClient(
+          Deno.env.get('SUPABASE_URL') ?? '', 
+          Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? ''
         );
-        await supabaseClientForError.from('resumes').update({ parsing_status: 'failed' }).eq('id', resumeId);
-        console.log(`Updated resume ${resumeId} status to 'failed'.`);
-      } catch (updateError) {
-        console.error('Fatal: Failed to update resume status to failed.', updateError);
+        await serviceClient
+          .from('resumes')
+          .update({ parsing_status: 'failed', parsing_error: error.message })
+          .eq('id', resumeId);
+      } catch (e) { 
+        console.error('Failed to update status to failed:', e.message); 
       }
     }
     
-    return new Response(JSON.stringify({ error: error.message }), {
-      status: 500,
-      headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+    return new Response(JSON.stringify({ error: error.message }), { 
+      status: 500, 
+      headers: { 'Access-Control-Allow-Origin': '*', 'Content-Type': 'application/json' } 
     });
   }
 });
